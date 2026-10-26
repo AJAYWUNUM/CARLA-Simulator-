@@ -534,6 +534,8 @@ class SkyRouteCity(SkyRoute3D):
         self.sensor_target = None
         self.avoidance_focus = None
         self.avoidance_cooldowns = {}
+        self.detected_course_hazards = set()
+        self._planning_obstacle = None
         self._planning_mode = False
         super().__init__()
         self.camera_mode = "overview"
@@ -590,35 +592,39 @@ class SkyRouteCity(SkyRoute3D):
             buildings.append(UrbanObstacle(f"City traffic {i+1:02d}", "vehicle", home,
                                             (4.5,2.0,.85), colour, motion=motion))
 
-        # A twelve-object aerial course crosses the route at timed intervals.
-        # Each object is centered on the flight line at its predicted arrival
-        # time, so the forward sensor has a clear chance to detect it first.
+        # A twelve-object aerial course crosses the route at varied headings.
+        # A seeded random stream keeps each run repeatable while giving every
+        # object its own axis, direction, speed and crossing distance.
         takeoff_time = self.START[2] / 9.0
         cruise_speed = 35.0
+        course_rng = random.Random(41217)
 
-        def course_motion(fraction, lateral_range, angular_speed):
+        def course_motion(fraction, lateral_range, angular_speed, axis, direction):
             point=lerp(self.START,self.GOAL,fraction)
             route_point=(point[0],point[1],self.START[2])
             encounter_time=takeoff_time+distance(self.START,route_point)/cruise_speed
-            phase=-angular_speed*encounter_time
-            return point,(1,point[1]-lateral_range,point[1]+lateral_range,angular_speed,phase)
+            # At the expected encounter time, sin(angle) is zero: the hazard
+            # crosses the route in either the positive or negative direction.
+            phase=-angular_speed*encounter_time+(math.pi if direction<0 else 0.0)
+            coordinate=point[axis]
+            return point,(axis,coordinate-lateral_range,coordinate+lateral_range,angular_speed,phase)
 
-        number=0
-        for fraction in (.12,.27,.42,.58,.73,.88):
-            number+=1
-            point,motion=course_motion(fraction,60.0,.08)
-            buildings.append(UrbanObstacle(f"Course hazard {number:02d} · crossing UAV",
-                                            "aircraft",point,1.2,(.91,.34,.22),motion=motion))
-        for fraction in (.19,.50,.81):
-            number+=1
-            point,motion=course_motion(fraction,55.0,.055)
-            buildings.append(UrbanObstacle(f"Course hazard {number:02d} · sensor balloon",
-                                            "sphere",point,4.0,(.95,.67,.18),motion=motion))
-        for fraction in (.34,.66,.94):
-            number+=1
-            point,motion=course_motion(fraction,42.0,.075)
-            buildings.append(UrbanObstacle(f"Course hazard {number:02d} · work platform",
-                                            "box",point,(5.5,3.5,2.5),(.82,.30,.22),motion=motion))
+        hazard_specs = [
+            *((fraction,"aircraft",1.2,(.91,.34,.22),"crossing UAV")
+              for fraction in (.12,.27,.42,.58,.73,.88)),
+            *((fraction,"sphere",4.0,(.95,.67,.18),"sensor balloon")
+              for fraction in (.19,.50,.81)),
+            *((fraction,"box",(5.5,3.5,2.5),(.82,.30,.22),"work platform")
+              for fraction in (.34,.66,.94)),
+        ]
+        for number,(fraction,kind,size,colour,description) in enumerate(hazard_specs,1):
+            axis=course_rng.choice((0,1))
+            direction=course_rng.choice((-1,1))
+            lateral_range=course_rng.uniform(48.0,76.0)
+            angular_speed=course_rng.uniform(.025,.050)
+            point,motion=course_motion(fraction,lateral_range,angular_speed,axis,direction)
+            buildings.append(UrbanObstacle(f"Course hazard {number:02d} · {description}",
+                                            kind,point,size,colour,motion=motion))
 
         # Small moving pedestrians add scale cues to the sidewalks.
         for i in range(14):
@@ -665,6 +671,7 @@ class SkyRouteCity(SkyRoute3D):
         self.sensor_target=None
         self.avoidance_focus=None
         self.avoidance_cooldowns.clear()
+        self.detected_course_hazards.clear()
         self.camera_mode="overview"
         self.camera_distance=4600.0
         self.camera_elevation=56.0
@@ -702,6 +709,13 @@ class SkyRouteCity(SkyRoute3D):
     def collides(self,point,clearance=0.0):
         px,py,pz=point
         for obstacle in self.obstacles:
+            # In sensor mode, replan around the hazard currently in view.
+            # Future course hazards remain unknown so the forward sensor can
+            # encounter and report them one at a time during the mission.
+            if (self._planning_mode and getattr(self,"mission_type",None)=="sensor"
+                    and obstacle.name.startswith("Course hazard")
+                    and obstacle is not self._planning_obstacle):
+                continue
             center=self.predicted_center(obstacle) if self._planning_mode else obstacle.center
             cx,cy,cz=center
             dynamic_pad=.82 if self._planning_mode and obstacle.motion else 0.0
@@ -754,26 +768,53 @@ class SkyRouteCity(SkyRoute3D):
         forward=unit(sub(aim,self.drone))
         nearest=None
         nearest_distance=self.SENSOR_RANGE+1
+        speed=max(1.0,getattr(self,"CRUISE_SPEED",35.0))
+        max_horizon=self.SENSOR_RANGE/speed
         for obstacle in self.obstacles:
-            center=self.predicted_center(obstacle,.25)
+            # An avoided hazard must not mask the next one in the forward
+            # sensor beam while its short re-detection cooldown is active.
+            if self.avoidance_cooldowns.get(obstacle,0.0)>self.time:
+                continue
+            if (obstacle.name.startswith("Course hazard") and
+                    obstacle.name in self.detected_course_hazards):
+                continue
+            center=self.predicted_center(obstacle)
             delta=sub(center,self.drone)
             along=dot(delta,forward)
             if along<=0 or along>self.SENSOR_RANGE:
                 continue
-            side=length(sub(delta,mul(forward,along)))
+            # Predict where a moving object and the drone will be at the
+            # same time. This lets the sensor flag a crossing hazard while
+            # it is still laterally offset, rather than only at the crossing.
+            horizon=clamp(along/speed,0.0,max_horizon)
+            predicted=None
+            for _ in range(3):
+                predicted=self.predicted_center(obstacle,horizon)
+                projected=sub(predicted,self.drone)
+                predicted_along=dot(projected,forward)
+                if predicted_along<=0 or predicted_along>self.SENSOR_RANGE:
+                    predicted=None
+                    break
+                horizon=clamp(predicted_along/speed,0.0,max_horizon)
+            if predicted is None:
+                continue
+            future_drone=add(self.drone,mul(forward,speed*horizon))
+            miss=sub(predicted,future_drone)
+            future_along=dot(miss,forward)
+            side=length(sub(miss,mul(forward,future_along)))
             if obstacle.kind=="aircraft":
-                vertical_extent=obstacle.size+1.0
-                lateral_extent=obstacle.size+1.25
+                vertical_extent=obstacle.size+12.0
+                lateral_extent=obstacle.size+15.0
             elif obstacle.kind=="vehicle":
-                vertical_extent=obstacle.size[2]+.9
-                lateral_extent=max(obstacle.size[0],obstacle.size[1])+1.0
+                vertical_extent=obstacle.size[2]+12.0
+                lateral_extent=max(obstacle.size[0],obstacle.size[1])+15.0
             elif obstacle.kind=="box":
-                vertical_extent=obstacle.size[2]+.55
-                lateral_extent=max(obstacle.size[0],obstacle.size[1])+.75
+                vertical_extent=obstacle.size[2]+12.0
+                lateral_extent=max(obstacle.size[0],obstacle.size[1])+15.0
             else:
-                vertical_extent=obstacle.size+.8
-                lateral_extent=obstacle.size+.9
-            if abs(delta[2])>vertical_extent or side>lateral_extent:
+                vertical_extent=obstacle.size+12.0
+                lateral_extent=obstacle.size+15.0
+            if abs(miss[2])>vertical_extent or side>lateral_extent or abs(future_along)>10.0:
                 continue
             d=length(delta)
             if d<nearest_distance:
@@ -786,13 +827,19 @@ class SkyRouteCity(SkyRoute3D):
         self.avoidance_focus=obstacle
         self.sensor_target=obstacle
         self.sensor_reading=distance(self.drone,self.predicted_center(obstacle,.25))
-        self.avoidance_cooldowns[obstacle]=self.time+4.5
+        self.avoidance_cooldowns[obstacle]=self.time+6.0
+        if obstacle.name.startswith("Course hazard"):
+            self.detected_course_hazards.add(obstacle.name)
         self.velocity=0.0
         label="PROXIMITY WARNING" if emergency else "RANGE SENSOR DETECTED"
         self.set_status(f"{label} · {obstacle.name.upper()} AT {self.sensor_reading:.1f}M · REROUTING",3.0)
         self.direct_target=None
         self.mode="replan"
-        path=self.plan_path(self.drone,self.GOAL)
+        self._planning_obstacle=obstacle
+        try:
+            path=self.plan_path(self.drone,self.GOAL)
+        finally:
+            self._planning_obstacle=None
         if path:
             self.route=path
             self.route_index=1 if len(path)>1 else 0
@@ -1291,9 +1338,10 @@ class SkyRouteCity(SkyRoute3D):
         l["status"].color=(177,104,29,255) if self.mode=="replan" else (35,55,79,255)
         l["alt"].y=94; l["alt"].text=f"{self.drone[2]:.2f} m"
         l["speed"].y=94; l["speed"].text=f"{self.velocity:.1f} m/s"
-        l["contact_head"].y=52; l["contact_head"].text="SENSOR AVOIDANCES"
-        l["contact_count"].y=49; l["contact_count"].text=str(self.avoidances)
-        l["sensor_value"].x=186; l["sensor_value"].y=49
+        l["contact_head"].y=52; l["contact_head"].text="COURSE HAZARDS SENSED"
+        l["contact_count"].x=143; l["contact_count"].y=49
+        l["contact_count"].text=f"{len(self.detected_course_hazards):02d}/{self.COURSE_HAZARD_COUNT}"
+        l["sensor_value"].x=196; l["sensor_value"].y=49
         l["sensor_value"].text=f"LAST DETECTION {self.sensor_reading:.1f}m" if self.avoidances else f"SENSOR RANGE {self.SENSOR_RANGE:.1f}m"
         l["controls"].y=24
         l["world_title"].x=self.SIDEBAR+32; l["world_title"].y=h-31
@@ -1596,7 +1644,6 @@ class SkyRouteMission(SkyRouteCity):
 if __name__=="__main__":
     app=SkyRouteMission()
     pyglet.app.run()
-
 
 
 
