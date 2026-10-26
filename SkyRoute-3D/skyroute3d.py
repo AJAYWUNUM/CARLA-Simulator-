@@ -1078,7 +1078,11 @@ class SkyRouteCity(SkyRoute3D):
             self.route_index=1 if len(path)>1 else 0
             self.route_planner=planner_name
             self.mode="follow"
-            self.set_status(f"COLLISION RISK · {planner_name} ROUTE ACTIVE",3.0)
+            if planner_name=="D* LITE":
+                self.resultant_route=list(path)
+                self.set_status("SENSOR MODE · D* RESULTANT PATH ACTIVE",3.0)
+            else:
+                self.set_status(f"COLLISION RISK · {planner_name} ROUTE ACTIVE",3.0)
         else:
             self.route=[]
             self.mode="idle"
@@ -1496,6 +1500,18 @@ class SkyRouteCity(SkyRoute3D):
         if len(self.route)<2:
             return
         dstar_route=getattr(self,"route_planner",None)=="D* LITE"
+        # Keep the original sensor-mode A* route visible as a faint reference
+        # after a risk is detected. The active orange route is the D* result
+        # the drone is currently following.
+        baseline=getattr(self,"baseline_route",[])
+        if dstar_route and self.mode not in ("landing","complete") and len(baseline)>1:
+            glLineWidth(2.0)
+            glColor4f(.08,.63,.70,.30)
+            glBegin(GL_LINES)
+            for a,b in zip(baseline,baseline[1:]):
+                glVertex3f(a[0],a[1],a[2]+1.0)
+                glVertex3f(b[0],b[1],b[2]+1.0)
+            glEnd()
         glLineWidth(4.0 if self.mode=="direct" or dstar_route else 3.2)
         if self.mode=="direct" or dstar_route:
             glColor4f(.96,.51,.17,.94)
@@ -1707,6 +1723,8 @@ class SkyRouteMission(SkyRouteCity):
         self.mode="idle"
         self.route=[]
         self.route_index=0
+        self.baseline_route=[]
+        self.resultant_route=[]
         self.direct_target=None
         self.mission_type="sensor"
         self.route_planner="A*"
@@ -1726,7 +1744,7 @@ class SkyRouteMission(SkyRouteCity):
         self.camera_distance=220.0
         self.camera_elevation=32.0
         self.mode="takeoff"
-        self.set_status("SENSOR MODE · A* BASELINE · TAKING OFF",2.2)
+        self.set_status("SENSOR MODE · A* NORMAL PATH · TAKING OFF",2.2)
 
     def run_safe_route(self):
         self.reset()
@@ -1799,8 +1817,10 @@ class SkyRouteMission(SkyRouteCity):
                     self.route=path
                     self.route_index=1 if len(path)>1 else 0
                     self.route_planner="A*"
+                    self.baseline_route=list(path) if self.mission_type=="sensor" else []
+                    self.resultant_route=[]
                     self.mode="follow"
-                    status="SENSOR MODE · A* BASELINE · SENSORS ACTIVE" if self.mission_type=="sensor" else "SAFE MODE · A* ROUTE ACTIVE"
+                    status="SENSOR MODE · A* NORMAL PATH · SENSORS ACTIVE" if self.mission_type=="sensor" else "SAFE MODE · A* ROUTE ACTIVE"
                     self.set_status(status,2.5)
                 else:
                     self.mode="idle"
@@ -1843,7 +1863,7 @@ class SkyRouteMission(SkyRouteCity):
         if self.mode=="follow" and self.mission_type=="safe":
             return "FOLLOWING SAFE A* ROUTE"
         if self.mode=="follow" and self.mission_type=="sensor":
-            return "FOLLOWING D* LITE REROUTE" if self.route_planner=="D* LITE" else "FOLLOWING SENSOR A* BASELINE"
+            return "FOLLOWING D* RESULTANT PATH" if self.route_planner=="D* LITE" else "FOLLOWING NORMAL A* PATH · SENSORS ACTIVE"
         return {
             "idle":"READY · ON LAUNCH PAD",
             "takeoff":"TAKING OFF · CLIMBING TO ROUTE ALTITUDE",
@@ -1884,6 +1904,7 @@ class SkyRouteMission(SkyRouteCity):
 if __name__=="__main__":
     app=SkyRouteMission()
     pyglet.app.run()
+
 
 
 
