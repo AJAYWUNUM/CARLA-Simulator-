@@ -1710,7 +1710,7 @@ class SkyRouteMission(SkyRouteCity):
         self.labels["button_contact"].text="START SENSOR MISSION"
         self.labels["button_auto"].text="START SAFE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
-        self.labels["mission_sub"].text="Sensor: A* + D* · Safe: A* · rooftop landing"
+        self.labels["mission_sub"].text="Sensor: D* resultant + live reroutes · Safe: A* · rooftop landing"
         self.labels["world_sub"].text="4.41 km² · tree-lined streets · 64 moving cars · 12 aerial hazards"
         self.labels["controls"].text="C sensor mode  A safe mode  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
@@ -1744,7 +1744,7 @@ class SkyRouteMission(SkyRouteCity):
         self.camera_distance=220.0
         self.camera_elevation=32.0
         self.mode="takeoff"
-        self.set_status("SENSOR MODE · A* NORMAL PATH · TAKING OFF",2.2)
+        self.set_status("SENSOR MODE · D* RESULTANT PATH · TAKING OFF",2.2)
 
     def run_safe_route(self):
         self.reset()
@@ -1812,20 +1812,26 @@ class SkyRouteMission(SkyRouteCity):
 
         if self.mode=="takeoff":
             if self.move_drone(self.START,self.TAKEOFF_SPEED,dt):
-                path=self.plan_path(self.START,self.GOAL)
+                if self.mission_type=="sensor":
+                    path=self.plan_path_dstar(self.START,self.GOAL)
+                    planner_name="D* LITE"
+                else:
+                    path=self.plan_path(self.START,self.GOAL)
+                    planner_name="A*"
                 if path:
                     self.route=path
                     self.route_index=1 if len(path)>1 else 0
-                    self.route_planner="A*"
-                    self.baseline_route=list(path) if self.mission_type=="sensor" else []
-                    self.resultant_route=[]
+                    self.route_planner=planner_name
+                    self.baseline_route=[]
+                    self.resultant_route=list(path) if self.mission_type=="sensor" else []
                     self.mode="follow"
-                    status="SENSOR MODE · A* NORMAL PATH · SENSORS ACTIVE" if self.mission_type=="sensor" else "SAFE MODE · A* ROUTE ACTIVE"
+                    status="SENSOR MODE · D* RESULTANT PATH ACTIVE · SENSORS LIVE" if self.mission_type=="sensor" else "SAFE MODE · A* ROUTE ACTIVE"
                     self.set_status(status,2.5)
                 else:
                     self.mode="idle"
                     self.drone=self.START_PAD
-                    self.set_status("NO A* ROUTE · RETURNED TO PAD",3.0)
+                    failed_planner="D* RESULTANT" if self.mission_type=="sensor" else "A*"
+                    self.set_status(f"NO {failed_planner} ROUTE · RETURNED TO PAD",3.0)
             return
 
         if self.mode in ("direct","follow"):
@@ -1863,7 +1869,7 @@ class SkyRouteMission(SkyRouteCity):
         if self.mode=="follow" and self.mission_type=="safe":
             return "FOLLOWING SAFE A* ROUTE"
         if self.mode=="follow" and self.mission_type=="sensor":
-            return "FOLLOWING D* RESULTANT PATH" if self.route_planner=="D* LITE" else "FOLLOWING NORMAL A* PATH · SENSORS ACTIVE"
+            return "FOLLOWING D* RESULTANT PATH · SENSORS ACTIVE"
         return {
             "idle":"READY · ON LAUNCH PAD",
             "takeoff":"TAKING OFF · CLIMBING TO ROUTE ALTITUDE",
