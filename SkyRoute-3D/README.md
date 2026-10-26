@@ -1,14 +1,14 @@
-# SkyRoute Urban 3D � UAV Path Planning Microproject
+# SkyRoute Urban 3D - UAV Path Planning Microproject
 
 A native OpenGL desktop simulation for autonomous UAV navigation in a procedural downtown street scene. It uses a white, high-visibility presentation with city roads, intersections, building facades, street trees, lamps, moving traffic, and a crossing UAV.
 
 ## Run
 
-Double-click run_skyroute.bat. Python 3.10 or newer is required. Pyglet 2.1.19 is bundled in vendor for an offline launch. If the vendor folder is absent (for example, after cloning the source from GitHub), the launcher installs the version pinned in requirements.txt.
+Double-click run_skyroute.bat. Python 3.10 or newer is required. Pyglet 2.1.19 is bundled in vendor for an offline launch. If the vendor folder is absent after cloning the source from GitHub, the launcher installs the version pinned in requirements.txt.
 
 ## Sensor avoidance demo
 
-Choose Run Sensor Avoidance or press C. The drone scans ahead with visible forward range-sensor beams. When a moving UAV enters the flight corridor, the sensor reports its distance and the planner computes a clear route before the drone reaches it. The aircraft never needs to make contact. The avoidance counter records sensor-triggered reroutes.
+Choose Run Sensor Avoidance or press C. The drone scans ahead with visible forward range-sensor beams. When a moving UAV enters the flight corridor, the sensor reports its distance and the planner computes a clear route before the drone reaches it. The aircraft does not need to make contact. The avoidance counter records sensor-triggered reroutes.
 
 Choose Autonomous Route or press A to plan a safe route from the start. Press R to reset and Space to pause or resume.
 
@@ -29,7 +29,6 @@ The scene is procedural and designed to make the path-planning behavior easy to 
 
 ## Project files
 
-- skyroute3d.py � simulation, city scene, sensor logic, and 3D renderer.
-- run_skyroute.bat � Windows launcher.
-- requirements.txt � pinned Pyglet dependency for source checkouts.
-- vendor/pyglet � bundled windowing and OpenGL library for offline use.
+- skyroute3d.py - simulation, city scene, sensor logic, and 3D renderer.
+- run_skyroute.bat - Windows launcher.
+- requirements.txt - pinned Pyglet dependency for source checkouts.
