@@ -1745,7 +1745,8 @@ class SkyRouteCity(SkyRoute3D):
         for _,point in self._lidar_detections:
             draw_sphere(point,2.2,(.10,.76,.83),10,6,.86)
         if self.sensor_target:
-            target=self.sensor_target.center
+            track=self._kalman_tracks.get(self.sensor_target)
+            target=track.position if track else self.sensor_target.center
             draw_line(origin,target,(.96,.48,.18),2.3,.95)
             if self.sensor_target.kind=="aircraft":
                 draw_circle_xy((target[0],target[1],target[2]+.05),self.sensor_target.size+.18,
