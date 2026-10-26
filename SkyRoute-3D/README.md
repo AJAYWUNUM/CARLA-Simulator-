@@ -4,7 +4,7 @@ SkyRoute is a native OpenGL desktop simulation for an autonomous drone mission i
 
 ## Mission
 
-The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. In the sensor mission, forward range sensors detect hazards and the planner reroutes before contact. In the safe mission, A* plans a clearance route around the course. Both missions descend onto the landing pad and stop the rotors; the landed drone remains at the pad instead of hovering.
+The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. Both launch choices fly the same direct sensor-controlled course; they differ only in the initial camera view. Forward sensors predict moving intersections, make a short local sidestep around each sensed hazard, then rejoin the direct line. The mission descends onto the landing pad and stops the rotors; the landed drone remains at the pad instead of hovering.
 
 ## Run
 
@@ -29,7 +29,7 @@ The camera label at the top right also cycles through the views when clicked.
 - City footprint: 4.2 km × 1.05 km (4.41 km²), with a 20-by-4 block grid.
 - 80 varied buildings with multi-floor windows, reflective glazing, roof parapets and rooftop equipment.
 - 22 moving vehicles, 14 sidewalk pedestrians and 12 moving course hazards. The hazards use seeded variation in direction, crossing axis, speed and distance so their motion is repeatable but not synchronized.
-- Forward sensors predict near-future intersections, skip hazards already handled, and reroute around one newly sensed course hazard at a time. The HUD counts unique course hazards sensed out of 12.
+- Forward sensors predict near-future intersections and make a short local sidestep around each detected hazard before rejoining the original direct course. Upcoming detections are queued if they enter sensor range during a sidestep; the HUD counts unique course hazards sensed out of 12.
 - Mission stages: launch, vertical takeoff, cruise, landing approach, touchdown and motors idle.
 - Four-plus camera angles with a separate full-city view.
 
