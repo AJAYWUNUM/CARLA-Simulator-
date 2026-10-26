@@ -341,7 +341,7 @@ class SkyRoute3D(pyglet.window.Window):
 
     def draw_world_route(self):
         if len(self.route)<2: return
-        if self.mode=="direct":
+        if self.mode=="direct" or getattr(self,"route_planner",None)=="D* LITE":
             for a,b in zip(self.route,self.route[1:]):
                 span=distance(a,b); count=max(1,int(span/.42))
                 for i in range(0,count,2):
@@ -514,6 +514,155 @@ class UrbanObstacle(Obstacle):
         self.heading = 0.0
 
 
+class DStarLitePlanner:
+    """Incremental backward search for repairing a route after map changes."""
+    def __init__(self,dims,step,start,goal):
+        self.dims=dims
+        self.step=step
+        self.start=start
+        self.last_start=start
+        self.goal=goal
+        self.km=0.0
+        self.g={}
+        self.rhs={goal:0.0}
+        self.blocked=set()
+        self.queue=[]
+        self.versions={}
+        self.serial=0
+        self.initialized=False
+        self._push(goal)
+
+    @staticmethod
+    def value(table,node):
+        return table.get(node,math.inf)
+
+    def heuristic(self,a,b):
+        return self.step*math.sqrt(sum((a[i]-b[i])**2 for i in range(3)))
+
+    def calculate_key(self,node):
+        best=min(self.value(self.g,node),self.value(self.rhs,node))
+        return best+self.heuristic(self.start,node)+self.km,best
+
+    def neighbors(self,node):
+        for offset in ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)):
+            nxt=tuple(node[i]+offset[i] for i in range(3))
+            if all(0<=nxt[i]<self.dims[i] for i in range(3)):
+                yield nxt
+
+    def edge_cost(self,a,b):
+        return self.heuristic(a,b)
+
+    def _push(self,node,version=None):
+        if version is None:
+            version=self.versions.get(node,0)+1
+            self.versions[node]=version
+        k1,k2=self.calculate_key(node)
+        self.serial+=1
+        heapq.heappush(self.queue,(k1,k2,self.serial,node,version))
+
+    def _top_key(self):
+        while self.queue:
+            k1,k2,_,node,version=self.queue[0]
+            if self.versions.get(node)!=version:
+                heapq.heappop(self.queue)
+                continue
+            return k1,k2
+        return math.inf,math.inf
+
+    def _pop(self):
+        while self.queue:
+            k1,k2,_,node,version=heapq.heappop(self.queue)
+            if self.versions.get(node)==version:
+                return (k1,k2),node
+        return (math.inf,math.inf),None
+
+    def update_vertex(self,node):
+        if node!=self.goal:
+            if node in self.blocked:
+                self.rhs[node]=math.inf
+            else:
+                self.rhs[node]=min(
+                    (self.edge_cost(node,nxt)+self.value(self.g,nxt)
+                     for nxt in self.neighbors(node) if nxt not in self.blocked),
+                    default=math.inf,
+                )
+        version=self.versions.get(node,0)+1
+        self.versions[node]=version
+        if self.value(self.g,node)!=self.value(self.rhs,node):
+            self._push(node,version)
+
+    def update_blocked(self,new_blocked):
+        new_blocked=set(new_blocked)
+        changed=(self.blocked^new_blocked)
+        self.blocked=new_blocked
+        if not self.initialized:
+            affected=set(self.blocked)
+            for node in self.blocked:
+                affected.update(self.neighbors(node))
+            self.initialized=True
+        else:
+            affected=set(changed)
+            for node in changed:
+                affected.update(self.neighbors(node))
+        for node in affected:
+            self.update_vertex(node)
+
+    def move_start(self,new_start):
+        if new_start!=self.start:
+            self.km+=self.heuristic(self.last_start,new_start)
+            self.last_start=new_start
+            self.start=new_start
+
+    def compute_shortest_path(self):
+        start_key=self.calculate_key(self.start)
+        while self._top_key()<start_key or self.value(self.rhs,self.start)!=self.value(self.g,self.start):
+            old_key,node=self._pop()
+            if node is None:
+                break
+            new_key=self.calculate_key(node)
+            if old_key<new_key:
+                self._push(node)
+            elif self.value(self.g,node)>self.value(self.rhs,node):
+                self.g[node]=self.value(self.rhs,node)
+                for predecessor in self.neighbors(node):
+                    self.update_vertex(predecessor)
+            else:
+                self.g[node]=math.inf
+                self.update_vertex(node)
+                for predecessor in self.neighbors(node):
+                    self.update_vertex(predecessor)
+            start_key=self.calculate_key(self.start)
+
+    def extract_path(self):
+        if self.start in self.blocked or self.goal in self.blocked:
+            return []
+        self.compute_shortest_path()
+        if math.isinf(self.value(self.g,self.start)):
+            return []
+        path=[self.start]
+        seen={self.start}
+        current=self.start
+        max_steps=math.prod(self.dims)
+        for _ in range(max_steps):
+            if current==self.goal:
+                return path
+            choices=[]
+            for nxt in self.neighbors(current):
+                if nxt in self.blocked:
+                    continue
+                score=self.edge_cost(current,nxt)+self.value(self.g,nxt)
+                if not math.isinf(score):
+                    choices.append((score,self.heuristic(nxt,self.goal),nxt))
+            if not choices:
+                return []
+            current=min(choices)[2]
+            if current in seen:
+                return []
+            seen.add(current)
+            path.append(current)
+        return []
+
+
 class SkyRouteCity(SkyRoute3D):
     """Urban sensor-avoidance scenario with moving traffic and camera presets."""
     # 4.2 km x 1.05 km = 4.41 km², with a long axis like Central Park.
@@ -538,6 +687,7 @@ class SkyRouteCity(SkyRoute3D):
         self.detected_course_hazards = set()
         self._planning_obstacle = None
         self._planning_mode = False
+        self._dstar_planner = None
         super().__init__()
         self.camera_mode = "overview"
         self.camera_distance = 4600.0
@@ -687,6 +837,9 @@ class SkyRouteCity(SkyRoute3D):
         self.avoidance_focus=None
         self.avoidance_cooldowns.clear()
         self.detected_course_hazards.clear()
+        self._dstar_planner=None
+        self._planning_obstacle=None
+        self._planning_mode=False
         self.camera_mode="overview"
         self.camera_distance=4600.0
         self.camera_elevation=56.0
@@ -752,6 +905,69 @@ class SkyRouteCity(SkyRoute3D):
         finally:
             self._planning_mode=False
 
+    def plan_path_dstar(self,start,goal):
+        step=self.GRID_STEP
+        lo,hi=self.WORLD_MIN,self.WORLD_MAX
+        dims=tuple(int(round((hi[i]-lo[i])/step))+1 for i in range(3))
+        def to_cell(point):
+            return tuple(int(round((point[i]-lo[i])/step)) for i in range(3))
+        def to_point(cell):
+            return tuple(lo[i]+cell[i]*step for i in range(3))
+        start_cell,goal_cell=to_cell(start),to_cell(goal)
+        old_planning_mode=self._planning_mode
+        self._planning_mode=True
+        try:
+            if self.collides(start,.25) or self.collides(goal,.25):
+                return []
+            blocked=set()
+            target=self._planning_obstacle
+            target_center=self.predicted_center(target) if target else None
+            target_pad=step*.55
+            for x in range(dims[0]):
+                for y in range(dims[1]):
+                    for z in range(dims[2]):
+                        cell=(x,y,z)
+                        point=to_point(cell)
+                        blocked_here=self.collides(point,.53)
+                        if not blocked_here and target is not None:
+                            px,py,pz=point
+                            cx,cy,cz=target_center
+                            if target.kind in ("box","vehicle"):
+                                hx,hy,hz=target.size
+                                blocked_here=(abs(px-cx)<=hx+target_pad and
+                                              abs(py-cy)<=hy+target_pad and
+                                              abs(pz-cz)<=hz+target_pad)
+                            else:
+                                radius=target.size+target_pad
+                                blocked_here=((px-cx)**2+(py-cy)**2+(pz-cz)**2<=radius*radius)
+                        if blocked_here:
+                            blocked.add(cell)
+            planner=self._dstar_planner
+            if (planner is None or planner.dims!=dims or planner.step!=step or
+                    planner.goal!=goal_cell):
+                planner=DStarLitePlanner(dims,step,start_cell,goal_cell)
+                self._dstar_planner=planner
+            else:
+                planner.move_start(start_cell)
+            planner.update_blocked(blocked)
+            cells=planner.extract_path()
+            if not cells:
+                return []
+            raw=[start]+[to_point(cell) for cell in cells[1:-1]]+[goal]
+            smooth=[raw[0]]
+            anchor=0
+            while anchor<len(raw)-1:
+                furthest=anchor+1
+                for candidate in range(len(raw)-1,anchor,-1):
+                    if self.segment_clear(raw[anchor],raw[candidate]):
+                        furthest=candidate
+                        break
+                smooth.append(raw[furthest])
+                anchor=furthest
+            return smooth
+        finally:
+            self._planning_mode=old_planning_mode
+
     def animate_city(self):
         for obstacle in self.obstacles:
             if not obstacle.motion:
@@ -771,10 +987,6 @@ class SkyRouteCity(SkyRoute3D):
     def route_aim(self):
         if self.mode=="direct":
             return self.direct_target or self.GOAL
-        if self.mode=="follow" and getattr(self,"sensor_avoidance_route",False):
-            # Keep scanning down the original course while making a short
-            # sidestep, so upcoming hazards can be queued in advance.
-            return self.GOAL
         if self.mode=="follow" and self.route:
             while self.route_index<len(self.route) and distance(self.drone,self.route[self.route_index])<.12:
                 self.route_index+=1
@@ -793,9 +1005,6 @@ class SkyRouteCity(SkyRoute3D):
             # An avoided hazard must not mask the next one in the forward
             # sensor beam while its short re-detection cooldown is active.
             if self.avoidance_cooldowns.get(obstacle,0.0)>self.time:
-                continue
-            if (obstacle.name.startswith("Course hazard") and
-                    obstacle.name in self.detected_course_hazards):
                 continue
             center=self.predicted_center(obstacle)
             delta=sub(center,self.drone)
@@ -842,20 +1051,6 @@ class SkyRouteCity(SkyRoute3D):
         return nearest
 
     def begin_sensor_avoidance(self,obstacle,emergency=False):
-        if (getattr(self,"mission_type",None)=="sensor"
-                and getattr(self,"sensor_avoidance_route",False)
-                and obstacle is not self.active_avoidance_obstacle
-                and not emergency):
-            if obstacle not in self.pending_sensor_hazards:
-                self.pending_sensor_hazards.append(obstacle)
-                self.avoidance_cooldowns[obstacle]=self.time+6.0
-                if obstacle.name.startswith("Course hazard"):
-                    self.detected_course_hazards.add(obstacle.name)
-                self.sensor_target=obstacle
-                self.sensor_reading=distance(self.drone,self.predicted_center(obstacle,.25))
-                self.set_status(f"RANGE SENSOR · {obstacle.name.upper()} QUEUED · DIRECT COURSE HELD",2.6)
-            return
-        self.drone=self.drone
         self.avoidances+=1
         self.avoidance_focus=obstacle
         self.sensor_target=obstacle
@@ -868,28 +1063,26 @@ class SkyRouteCity(SkyRoute3D):
         self.set_status(f"{label} · {obstacle.name.upper()} AT {self.sensor_reading:.1f}M · REROUTING",3.0)
         self.direct_target=None
         self.mode="replan"
-        if (getattr(self,"mission_type",None)=="sensor"
-                and hasattr(self,"make_local_avoidance_route")):
-            self.active_avoidance_obstacle=obstacle
-            self.route=self.make_local_avoidance_route(obstacle)
-            self.route_index=1
-            self.sensor_avoidance_route=True
-            self.mode="follow"
-            self.set_status(f"RANGE SENSOR · {obstacle.name.upper()} · LOCAL SIDESTEP · DIRECT COURSE",3.0)
-            return
         self._planning_obstacle=obstacle
         try:
-            path=self.plan_path(self.drone,self.GOAL)
+            if getattr(self,"mission_type",None)=="sensor":
+                path=self.plan_path_dstar(self.drone,self.GOAL)
+                planner_name="D* LITE"
+            else:
+                path=self.plan_path(self.drone,self.GOAL)
+                planner_name="A*"
         finally:
             self._planning_obstacle=None
         if path:
             self.route=path
             self.route_index=1 if len(path)>1 else 0
+            self.route_planner=planner_name
             self.mode="follow"
+            self.set_status(f"COLLISION RISK · {planner_name} ROUTE ACTIVE",3.0)
         else:
             self.route=[]
             self.mode="idle"
-            self.set_status("ROUTE BLOCKED · RESET TO TRY AGAIN",3.0)
+            self.set_status(f"{planner_name} ROUTE BLOCKED · HOLDING",3.0)
 
     def update(self,dt):
         dt=min(dt,.05)
@@ -1302,8 +1495,9 @@ class SkyRouteCity(SkyRoute3D):
     def draw_world_route(self):
         if len(self.route)<2:
             return
-        glLineWidth(3.2 if self.mode!="direct" else 4.0)
-        if self.mode=="direct":
+        dstar_route=getattr(self,"route_planner",None)=="D* LITE"
+        glLineWidth(4.0 if self.mode=="direct" or dstar_route else 3.2)
+        if self.mode=="direct" or dstar_route:
             glColor4f(.96,.51,.17,.94)
             glBegin(GL_LINES)
             for a,b in zip(self.route,self.route[1:]):
@@ -1500,7 +1694,7 @@ class SkyRouteMission(SkyRouteCity):
         self.labels["button_contact"].text="START SENSOR MISSION"
         self.labels["button_auto"].text="START SAFE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
-        self.labels["mission_sub"].text="Sensor: direct · Safe: planned · rooftop landing"
+        self.labels["mission_sub"].text="Sensor: A* + D* · Safe: A* · rooftop landing"
         self.labels["world_sub"].text="4.41 km² · tree-lined streets · 64 moving cars · 12 aerial hazards"
         self.labels["controls"].text="C sensor mode  A safe mode  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
@@ -1515,9 +1709,7 @@ class SkyRouteMission(SkyRouteCity):
         self.route_index=0
         self.direct_target=None
         self.mission_type="sensor"
-        self.sensor_avoidance_route=False
-        self.active_avoidance_obstacle=None
-        self.pending_sensor_hazards=[]
+        self.route_planner="A*"
         self.sensor_reading=self.SENSOR_RANGE
         self.sensor_target=None
         self.avoidances=0
@@ -1534,7 +1726,7 @@ class SkyRouteMission(SkyRouteCity):
         self.camera_distance=220.0
         self.camera_elevation=32.0
         self.mode="takeoff"
-        self.set_status("DIRECT SENSOR MISSION · TAKING OFF",2.2)
+        self.set_status("SENSOR MODE · A* BASELINE · TAKING OFF",2.2)
 
     def run_safe_route(self):
         self.reset()
@@ -1542,40 +1734,7 @@ class SkyRouteMission(SkyRouteCity):
         self.camera_mode="chase"
         self.camera_distance=220.0
         self.mode="takeoff"
-        self.set_status("SAFE MODE · TAKING OFF",2.2)
-
-    def make_local_avoidance_route(self,obstacle):
-        forward=unit(sub(self.GOAL,self.START))
-        side=(-forward[1],forward[0],0.0)
-        horizon=clamp(self.sensor_reading/max(1.0,self.CRUISE_SPEED),
-                      0.0,self.SENSOR_RANGE/max(1.0,self.CRUISE_SPEED))
-        predicted=self.predicted_center(obstacle,horizon)
-        along=clamp(dot(sub(predicted,self.drone),forward),28.0,self.SENSOR_RANGE+25.0)
-        if obstacle.kind in ("sphere","aircraft"):
-            extent=obstacle.size
-        else:
-            extent=max(obstacle.size[0],obstacle.size[1])
-        lead=max(27.0,extent+20.0)
-        lateral=max(25.0,extent+self.DRONE_RADIUS+12.0)
-        before=max(12.0,along-lead)
-        after=along+lead
-        rejoin=min(after+18.0,self.SENSOR_RANGE+60.0)
-        preferred=1.0 if self.avoidances%2 else -1.0
-
-        def make_points(offset,vertical=0.0):
-            a=add(add(self.drone,mul(forward,before)),
-                  add(mul(side,offset),(0.0,0.0,vertical)))
-            b=add(add(self.drone,mul(forward,after)),
-                  add(mul(side,offset),(0.0,0.0,vertical)))
-            c=add(self.drone,mul(forward,rejoin))
-            return [self.drone,a,b,c]
-
-        for sign in (preferred,-preferred):
-            route=make_points(sign*lateral)
-            if all(not self.collides(point,self.DRONE_RADIUS+2.0) for point in route[1:]):
-                return route
-        # If both sides are occupied, climb briefly and rejoin the direct line.
-        return make_points(0.0,max(28.0,extent+18.0))
+        self.set_status("SAFE MODE · A* ROUTE · TAKING OFF",2.2)
 
     def begin_landing(self):
         self.drone=(self.GOAL[0],self.GOAL[1],max(self.GOAL[2],self.drone[2]))
@@ -1635,22 +1794,18 @@ class SkyRouteMission(SkyRouteCity):
 
         if self.mode=="takeoff":
             if self.move_drone(self.START,self.TAKEOFF_SPEED,dt):
-                if self.mission_type=="sensor":
-                    self.direct_target=self.GOAL
-                    self.route=[self.START,self.GOAL]
-                    self.mode="direct"
-                    self.set_status("AIRBORNE · RANGE SENSORS ACTIVE",2.3)
+                path=self.plan_path(self.START,self.GOAL)
+                if path:
+                    self.route=path
+                    self.route_index=1 if len(path)>1 else 0
+                    self.route_planner="A*"
+                    self.mode="follow"
+                    status="SENSOR MODE · A* BASELINE · SENSORS ACTIVE" if self.mission_type=="sensor" else "SAFE MODE · A* ROUTE ACTIVE"
+                    self.set_status(status,2.5)
                 else:
-                    path=self.plan_path(self.START,self.GOAL)
-                    if path:
-                        self.route=path
-                        self.route_index=1 if len(path)>1 else 0
-                        self.mode="follow"
-                        self.set_status("AIRBORNE · SAFE ROUTE ACTIVE",2.3)
-                    else:
-                        self.mode="idle"
-                        self.drone=self.START_PAD
-                        self.set_status("NO SAFE ROUTE · RETURNED TO PAD",3.0)
+                    self.mode="idle"
+                    self.drone=self.START_PAD
+                    self.set_status("NO A* ROUTE · RETURNED TO PAD",3.0)
             return
 
         if self.mode in ("direct","follow"):
@@ -1669,21 +1824,6 @@ class SkyRouteMission(SkyRouteCity):
             while self.route_index<len(self.route) and distance(self.drone,self.route[self.route_index])<.12:
                 self.route_index+=1
             if self.route_index>=len(self.route):
-                if self.sensor_avoidance_route:
-                    self.sensor_avoidance_route=False
-                    self.active_avoidance_obstacle=None
-                    self.route=[]
-                    self.route_index=0
-                    self.mode="direct"
-                    self.direct_target=self.GOAL
-                    self.set_status("CLEAR OF HAZARD · RESUMING DIRECT COURSE",2.5)
-                    while self.pending_sensor_hazards:
-                        next_obstacle=self.pending_sensor_hazards.pop(0)
-                        course_forward=unit(sub(self.GOAL,self.START))
-                        if dot(sub(self.predicted_center(next_obstacle),self.drone),course_forward)>0:
-                            self.begin_sensor_avoidance(next_obstacle)
-                            return
-                    return
                 self.begin_landing()
                 return
             self.move_drone(self.route[self.route_index],self.CRUISE_SPEED,dt)
@@ -1700,10 +1840,10 @@ class SkyRouteMission(SkyRouteCity):
     def status_for_mode(self):
         if self.paused:
             return "SIMULATION PAUSED"
-        if self.mode=="follow" and self.sensor_avoidance_route:
-            return "LOCAL SIDESTEP · REJOINING DIRECT COURSE"
         if self.mode=="follow" and self.mission_type=="safe":
-            return "FOLLOWING SAFE PLANNED ROUTE"
+            return "FOLLOWING SAFE A* ROUTE"
+        if self.mode=="follow" and self.mission_type=="sensor":
+            return "FOLLOWING D* LITE REROUTE" if self.route_planner=="D* LITE" else "FOLLOWING SENSOR A* BASELINE"
         return {
             "idle":"READY · ON LAUNCH PAD",
             "takeoff":"TAKING OFF · CLIMBING TO ROUTE ALTITUDE",
