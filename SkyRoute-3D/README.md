@@ -1,34 +1,44 @@
-# SkyRoute Urban 3D - UAV Path Planning Microproject
+# SkyRoute Urban 3D — UAV Path Planning Microproject
 
-A native OpenGL desktop simulation for autonomous UAV navigation in a procedural downtown street scene. It uses a white, high-visibility presentation with city roads, intersections, building facades, street trees, lamps, moving traffic, and a crossing UAV.
+SkyRoute is a native OpenGL desktop simulation for an autonomous drone mission in a generated downtown. The urban region is 4.2 km long by 1.05 km wide (4.41 km²), with 80 blocks, marked roads, sidewalks, detailed building facades and rooftops, moving cars, pedestrians, and a 12-hazard aerial course. The presentation keeps the bright white canvas while using richer city geometry and several camera views.
+
+## Mission
+
+The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. In the sensor mission, forward range sensors detect hazards and the planner reroutes before contact. In the safe mission, A* plans a clearance route around the course. Both missions descend onto the landing pad and stop the rotors; the landed drone remains at the pad instead of hovering.
 
 ## Run
 
-Double-click run_skyroute.bat. Python 3.10 or newer is required. The launcher installs Pyglet 2.1.19 from requirements.txt if the bundled vendor folder is absent.
+Double-click `run_skyroute.bat`. Python 3.10 or newer is required. Pyglet 2.1.19 is bundled in `vendor/pyglet` for offline launch. If the vendor folder is absent after cloning, the launcher installs the version pinned in `requirements.txt`.
 
-## Sensor avoidance demo
+## Controls
 
-Choose Run Sensor Avoidance or press C. The drone scans ahead with visible forward range-sensor beams. When a moving UAV enters the flight corridor, the sensor reports its distance and the planner computes a clear route before the drone reaches it. The aircraft does not need to make contact. The avoidance counter records sensor-triggered reroutes.
+- `C` — start sensor mission.
+- `A` — start preplanned safe-route mission.
+- `R` — return the drone to its launch pad and reset the scene.
+- `Space` — pause or resume.
+- `1` — orbit view; right-drag to orbit and scroll to zoom.
+- `2` — chase view.
+- `3` — pilot view.
+- `4` — overhead view following the drone.
+- `5` — full city overview.
 
-Choose Autonomous Route or press A to plan a safe route from the start. Press R to reset and Space to pause or resume.
+The camera label at the top right also cycles through the views when clicked.
 
-## Camera views
+## Simulation details
 
-Press 1 for orbit, 2 for chase, 3 for pilot view, and 4 for overhead. Right-drag to orbit the free camera and scroll to zoom. Click the camera label at the upper right to cycle through the views.
+- City footprint: 4.2 km × 1.05 km (4.41 km²), with a 20-by-4 block grid.
+- 80 varied buildings with multi-floor windows, reflective glazing, roof parapets and rooftop equipment.
+- 22 moving vehicles, 14 sidewalk pedestrians and 12 moving course hazards.
+- Visible forward sensor fan, measured detection distance, dynamic-object prediction and pre-contact rerouting.
+- Mission stages: launch, vertical takeoff, cruise, landing approach, touchdown and motors idle.
+- Four-plus camera angles with a separate full-city view.
 
-## Included simulation features
-
-- 3D A* route planning on a voxel grid, with dynamic-object prediction and clearance margins.
-- Moving cars, a moving crossing UAV, and a sidewalk robot.
-- Forward range-sensor fan and a visible detection line to the current hazard.
-- Pre-contact avoidance and live route replanning.
-- Four named camera views, plus free orbit and zoom.
-- Live altitude, speed, route state, and sensor-avoidance count.
-
-The scene is procedural and designed to make the path-planning behavior easy to see. Flight dynamics are simplified; this is a project demonstration, not a flight controller or a high-fidelity aerodynamic model.
+The city is procedural and has a Central Park-scale footprint; it is not a georeferenced New York map or the CARLA Unreal Engine renderer. Flight and sensor behavior are simplified for a microproject demonstration, not a flight controller.
 
 ## Project files
 
-- skyroute3d.py - simulation, city scene, sensor logic, and 3D renderer.
-- run_skyroute.bat - Windows launcher.
-- requirements.txt - pinned Pyglet dependency.
+- `skyroute3d.py` — simulation, city generation, sensor logic and 3D renderer.
+- `run_skyroute.bat` — Windows launcher.
+- `requirements.txt` — pinned Pyglet dependency.
+- `vendor/pyglet` — bundled windowing and OpenGL library.
+
