@@ -4,7 +4,7 @@ A native OpenGL desktop simulation for autonomous UAV navigation in a procedural
 
 ## Run
 
-Double-click run_skyroute.bat. Python 3.10 or newer is required. Pyglet 2.1.19 is bundled in vendor for an offline launch. If the vendor folder is absent after cloning the source from GitHub, the launcher installs the version pinned in requirements.txt.
+Double-click run_skyroute.bat. Python 3.10 or newer is required. The launcher installs Pyglet 2.1.19 from requirements.txt if the bundled vendor folder is absent.
 
 ## Sensor avoidance demo
 
@@ -31,4 +31,4 @@ The scene is procedural and designed to make the path-planning behavior easy to 
 
 - skyroute3d.py - simulation, city scene, sensor logic, and 3D renderer.
 - run_skyroute.bat - Windows launcher.
-- requirements.txt - pinned Pyglet dependency for source checkouts.
+- requirements.txt - pinned Pyglet dependency.
