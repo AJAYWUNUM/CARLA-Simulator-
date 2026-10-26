@@ -677,6 +677,9 @@ class SkyRouteCity(SkyRoute3D):
     SENSOR_RANGE = 180.0
     COURSE_HAZARD_COUNT = 12
     CITY_CAR_COUNT = 64
+    COURSE_LATERAL_PROFILE = ((0.0,0.0),(.08,70.0),(.24,175.0),
+                              (.46,175.0),(.70,120.0),(.90,55.0),
+                              (.98,0.0),(1.0,0.0))
 
     def __init__(self):
         self.camera_mode = "overview"
@@ -695,6 +698,20 @@ class SkyRouteCity(SkyRoute3D):
         self.camera_distance = 4600.0
         self.camera_elevation = 56.0
         self.set_caption("SkyRoute Urban 3D | 4.41 km² Downtown Flight Region")
+
+    @classmethod
+    def course_route_point(cls,fraction):
+        fraction=clamp(fraction,0.0,1.0)
+        offset=0.0
+        for (f0,d0),(f1,d1) in zip(cls.COURSE_LATERAL_PROFILE,cls.COURSE_LATERAL_PROFILE[1:]):
+            if fraction<=f1:
+                blend=(fraction-f0)/max(1e-9,f1-f0)
+                offset=d0+(d1-d0)*blend
+                break
+        direction=unit(sub(cls.GOAL,cls.START))
+        left=(-direction[1],direction[0])
+        base=lerp(cls.START,cls.GOAL,fraction)
+        return (base[0]+left[0]*offset,base[1]+left[1]*offset,base[2])
 
     def make_obstacles(self):
         rng = random.Random(41216)
@@ -767,8 +784,8 @@ class SkyRouteCity(SkyRoute3D):
         course_rng = random.Random(41217)
 
         def course_motion(fraction, lateral_range, angular_speed, axis, direction):
-            point=lerp(self.START,self.GOAL,fraction)
-            route_point=(point[0],point[1],self.START[2])
+            route_point=self.course_route_point(fraction)
+            point=route_point
             encounter_time=takeoff_time+distance(self.START,route_point)/cruise_speed
             # At the expected encounter time, sin(angle) is zero: the hazard
             # crosses the route in either the positive or negative direction.
@@ -1730,7 +1747,7 @@ class SkyRouteMission(SkyRouteCity):
     TAKEOFF_SPEED = 9.0
     CRUISE_SPEED = 35.0
     LANDING_SPEED = 8.0
-    SENSOR_ROUTE_FRACTIONS = (.24,.46,.70,.90)
+    SENSOR_ROUTE_FRACTIONS = (.08,.16,.24,.34,.46,.58,.70,.82,.90,.98)
 
     def __init__(self):
         super().__init__()
@@ -1743,7 +1760,7 @@ class SkyRouteMission(SkyRouteCity):
         self.labels["button_contact"].text="START SENSOR MISSION"
         self.labels["button_auto"].text="START SAFE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
-        self.labels["mission_sub"].text="Sensor: A* hazard corridor + D* local reroutes · Safe: A*"
+        self.labels["mission_sub"].text="Sensor: marked left corridor + D* reroutes · Safe: A*"
         self.labels["world_sub"].text="4.41 km² · tree-lined streets · 64 moving cars · 12 aerial hazards"
         self.labels["controls"].text="C sensor mode  A safe mode  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
@@ -1791,7 +1808,7 @@ class SkyRouteMission(SkyRouteCity):
         self.set_status("SAFE MODE · A* ROUTE · TAKING OFF",2.2)
 
     def plan_sensor_resultant_path(self,start,goal):
-        gates=[lerp(start,goal,fraction) for fraction in self.SENSOR_ROUTE_FRACTIONS]
+        gates=[self.course_route_point(fraction) for fraction in self.SENSOR_ROUTE_FRACTIONS]
         route=[]
         gate_route_indices=[]
         anchor=start
