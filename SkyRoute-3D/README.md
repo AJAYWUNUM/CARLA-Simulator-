@@ -28,8 +28,8 @@ The camera label at the top right also cycles through the views when clicked.
 
 - City footprint: 4.2 km × 1.05 km (4.41 km²), with a 20-by-4 block grid.
 - 80 varied buildings with multi-floor windows, reflective glazing, roof parapets and rooftop equipment.
-- 22 moving vehicles, 14 sidewalk pedestrians and 12 moving course hazards.
-- Visible forward sensor fan, measured detection distance, dynamic-object prediction and pre-contact rerouting.
+- 22 moving vehicles, 14 sidewalk pedestrians and 12 moving course hazards. The hazards use seeded variation in direction, crossing axis, speed and distance so their motion is repeatable but not synchronized.
+- Forward sensors predict near-future intersections, skip hazards already handled, and reroute around one newly sensed course hazard at a time. The HUD counts unique course hazards sensed out of 12.
 - Mission stages: launch, vertical takeoff, cruise, landing approach, touchdown and motors idle.
 - Four-plus camera angles with a separate full-city view.
 
@@ -41,4 +41,3 @@ The city is procedural and has a Central Park-scale footprint; it is not a geore
 - `run_skyroute.bat` — Windows launcher.
 - `requirements.txt` — pinned Pyglet dependency.
 - `vendor/pyglet` — bundled windowing and OpenGL library.
-
