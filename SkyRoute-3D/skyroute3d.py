@@ -1799,7 +1799,7 @@ class SkyRouteCity(SkyRoute3D):
                            if replan_samples else 0.0)
         mission_success=getattr(self,"mission_success",None)
         success_text="--" if mission_success is None else ("YES" if mission_success else "NO")
-        l["metrics"].x=self.SIDEBAR+34; l["metrics"].y=23
+        l["metrics"].x=self.SIDEBAR+34; l["metrics"].y=32
         l["metrics"].text=(f"PATH {path_km:.2f} km  ·  COLLISIONS {collision_count}  ·  RATE {collision_rate:.2f}/km\n"
                            f"REPLANS {getattr(self,'replan_count',0)}  ·  AVG {average_replan_ms:.1f} ms  ·  MISSION {success_text}")
         l["world_title"].x=self.SIDEBAR+32; l["world_title"].y=h-31
