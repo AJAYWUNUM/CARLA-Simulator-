@@ -4,6 +4,7 @@ import heapq
 import math
 import random
 import sys
+from time import perf_counter
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -107,6 +108,65 @@ class Obstacle:
         self.colour=colour; self.demo=demo; self.contacted=False
 
 
+class _AxisKalman:
+    """One-dimensional constant-velocity Kalman filter for a LiDAR axis."""
+    def __init__(self,position,measurement_variance=4.0,acceleration_variance=9.0):
+        self.position=float(position)
+        self.velocity=0.0
+        self.p00=25.0
+        self.p01=0.0
+        self.p10=0.0
+        self.p11=100.0
+        self.measurement_variance=measurement_variance
+        self.acceleration_variance=acceleration_variance
+
+    def update(self,measurement,dt):
+        dt=max(1e-3,float(dt))
+        q=self.acceleration_variance
+        old00,old01,old10,old11=self.p00,self.p01,self.p10,self.p11
+        self.position+=self.velocity*dt
+        self.p00=old00+dt*(old01+old10)+dt*dt*old11+q*dt**4*.25
+        self.p01=old01+dt*old11+q*dt**3*.5
+        self.p10=old10+dt*old11+q*dt**3*.5
+        self.p11=old11+q*dt*dt
+        pred00,pred01,pred10,pred11=self.p00,self.p01,self.p10,self.p11
+        innovation=float(measurement)-self.position
+        variance=max(1e-9,pred00+self.measurement_variance)
+        gain_position=pred00/variance
+        gain_velocity=pred10/variance
+        self.position+=gain_position*innovation
+        self.velocity+=gain_velocity*innovation
+        self.p00=max(1e-9,(1.0-gain_position)*pred00)
+        self.p01=(1.0-gain_position)*pred01
+        self.p10=pred10-gain_velocity*pred00
+        self.p11=max(1e-9,pred11-gain_velocity*pred01)
+
+
+class _KalmanObstacleTrack:
+    """Tracks noisy 3D LiDAR position samples and predicts obstacle motion."""
+    def __init__(self,measurement,time_now,measurement_variance=4.0):
+        self.axes=[_AxisKalman(measurement[i],measurement_variance) for i in range(3)]
+        self.last_seen_time=float(time_now)
+
+    def update(self,measurement,time_now):
+        dt=max(1e-3,float(time_now)-self.last_seen_time)
+        for i,axis in enumerate(self.axes):
+            axis.update(measurement[i],dt)
+        self.last_seen_time=float(time_now)
+
+    @property
+    def position(self):
+        return tuple(axis.position for axis in self.axes)
+
+    @property
+    def velocity(self):
+        return tuple(axis.velocity for axis in self.axes)
+
+    def predict(self,horizon):
+        horizon=max(0.0,float(horizon))
+        return tuple(axis.position+axis.velocity*horizon for axis in self.axes)
+
+
 class SkyRoute3D(pyglet.window.Window):
     SIDEBAR=322
     DRONE_RADIUS=.34
@@ -172,6 +232,8 @@ class SkyRoute3D(pyglet.window.Window):
             "world_sub":label("White campus  ·  3D planning  ·  collision response",0,0,9,(112,130,151,255)),
             "goal_tag":label("LANDING PAD",0,0,8,(34,128,102,255),True),
             "impact_tag":label("",0,0,11,(191,73,52,255),True),
+            "metrics":pyglet.text.Label("",x=self.SIDEBAR+34,y=0,font_name="Arial",font_size=8,
+                    color=(42,62,84,255),multiline=True,width=500),
         }
 
     def set_status(self,message,seconds=2.0):
@@ -676,7 +738,11 @@ class SkyRouteCity(SkyRoute3D):
     GRID_STEP = 50.0
     SENSOR_RANGE = 180.0
     COURSE_HAZARD_COUNT = 12
+    HAZARD_SPEED_SCALE = 1.0
     CITY_CAR_COUNT = 64
+    LIDAR_BEAM_ANGLES = (-32,-24,-16,-8,0,8,16,24,32)
+    LIDAR_BEAM_HALF_ANGLE = 5.0
+    LIDAR_MEASUREMENT_STD = 1.5
     COURSE_LATERAL_PROFILE = ((0.0,0.0),(.08,70.0),(.24,175.0),
                               (.46,175.0),(.70,120.0),(.90,55.0),
                               (.98,0.0),(1.0,0.0))
@@ -693,6 +759,9 @@ class SkyRouteCity(SkyRoute3D):
         self._planning_mode = False
         self._sensor_prediction = None
         self._dstar_planner = None
+        self._kalman_tracks = {}
+        self._lidar_detections = []
+        self.lidar_rng = random.Random(41218)
         super().__init__()
         self.camera_mode = "overview"
         self.camera_distance = 4600.0
@@ -801,11 +870,12 @@ class SkyRouteCity(SkyRoute3D):
             *((fraction,"box",(5.5,3.5,2.5),(.82,.30,.22),"work platform")
               for fraction in (.34,.66,.94)),
         ]
+        hazard_specs=hazard_specs[:max(1,min(int(self.COURSE_HAZARD_COUNT),len(hazard_specs)))]
         for number,(fraction,kind,size,colour,description) in enumerate(hazard_specs,1):
             axis=course_rng.choice((0,1))
             direction=course_rng.choice((-1,1))
             lateral_range=course_rng.uniform(48.0,76.0)
-            angular_speed=course_rng.uniform(.025,.050)
+            angular_speed=course_rng.uniform(.025,.050)*self.HAZARD_SPEED_SCALE
             point,motion=course_motion(fraction,lateral_range,angular_speed,axis,direction)
             buildings.append(UrbanObstacle(f"Course hazard {number:02d} · {description}",
                                             kind,point,size,colour,motion=motion))
@@ -861,6 +931,9 @@ class SkyRouteCity(SkyRoute3D):
         self._planning_obstacle_center=None
         self._planning_mode=False
         self._sensor_prediction=None
+        self._kalman_tracks.clear()
+        self._lidar_detections=[]
+        self.lidar_rng=random.Random(41218)
         self.camera_mode="overview"
         self.camera_distance=4600.0
         self.camera_elevation=56.0
@@ -1021,31 +1094,95 @@ class SkyRouteCity(SkyRoute3D):
                 return self.route[self.route_index]
         return self.GOAL
 
-    def detect_sensor_hazard(self):
+    def scan_lidar(self,forward):
+        """Cast a horizontal LiDAR fan and update tracks from noisy returns."""
+        forward_xy=unit((forward[0],forward[1],0.0))
+        if length(forward_xy)<1e-8:
+            heading=math.radians(self.heading)
+            forward_xy=(math.cos(heading),math.sin(heading),0.0)
+        nearest_by_beam={}
+        beams=self.LIDAR_BEAM_ANGLES
+        for obstacle in self.obstacles:
+            delta=sub(obstacle.center,self.drone)
+            horizontal=(delta[0],delta[1],0.0)
+            horizontal_range=length(horizontal)
+            range_3d=length(delta)
+            if range_3d<1e-6 or range_3d>self.SENSOR_RANGE:
+                continue
+            if horizontal_range<1e-6:
+                angle=0.0
+            else:
+                forward_dot=dot(forward_xy,horizontal)
+                cross_track=forward_xy[0]*horizontal[1]-forward_xy[1]*horizontal[0]
+                angle=math.degrees(math.atan2(cross_track,forward_dot))
+            beam=min(beams,key=lambda sample:abs(sample-angle))
+            if angle < beams[0]-self.LIDAR_BEAM_HALF_ANGLE or angle > beams[-1]+self.LIDAR_BEAM_HALF_ANGLE:
+                continue
+            if abs(angle-beam)>self.LIDAR_BEAM_HALF_ANGLE:
+                continue
+            if isinstance(obstacle.size,tuple):
+                vertical_extent=obstacle.size[2]
+                radius_xy=math.hypot(obstacle.size[0],obstacle.size[1])
+            else:
+                vertical_extent=obstacle.size
+                radius_xy=obstacle.size
+            if abs(delta[2])>vertical_extent+8.0:
+                continue
+            angular_radius=math.degrees(math.asin(clamp(radius_xy/max(horizontal_range,1e-6),0.0,.98)))
+            for beam in beams:
+                beam_delta=angle-beam
+                if abs(beam_delta)>self.LIDAR_BEAM_HALF_ANGLE+angular_radius:
+                    continue
+                ray_distance=max(0.0,horizontal_range*math.cos(math.radians(beam_delta))-radius_xy)
+                if ray_distance>self.SENSOR_RANGE:
+                    continue
+                current=nearest_by_beam.get(beam)
+                if current is None or ray_distance<current[0]:
+                    nearest_by_beam[beam]=(ray_distance,obstacle)
+
+        visible=sorted({obstacle for _,obstacle in nearest_by_beam.values()},
+                       key=lambda obstacle:obstacle.name)
+        found=[]
+        for obstacle in visible:
+            measurement=tuple(obstacle.center[i]+self.lidar_rng.gauss(0.0,self.LIDAR_MEASUREMENT_STD)
+                              for i in range(3))
+            track=self._kalman_tracks.get(obstacle)
+            if track is None:
+                track=_KalmanObstacleTrack(measurement,self.time,self.LIDAR_MEASUREMENT_STD**2)
+                self._kalman_tracks[obstacle]=track
+            else:
+                track.update(measurement,self.time)
+            found.append((obstacle,track))
+            if obstacle.name.startswith("Course hazard"):
+                self.detected_course_hazards.add(obstacle.name)
+        self._lidar_detections=sorted(((obstacle,track.position) for obstacle,track in found),
+                                      key=lambda item:distance(self.drone,item[1]))
+        return found
+
+    def detect_sensor_hazard(self,dt=1.0/60.0):
         aim=self.route_aim()
         forward=unit(sub(aim,self.drone))
+        if length(forward)<1e-8:
+            heading=math.radians(self.heading)
+            forward=(math.cos(heading),math.sin(heading),0.0)
+        detections=self.scan_lidar(forward)
         nearest=None
         nearest_distance=self.SENSOR_RANGE+1
         nearest_prediction=None
         speed=max(1.0,getattr(self,"CRUISE_SPEED",35.0))
         max_horizon=self.SENSOR_RANGE/speed
-        for obstacle in self.obstacles:
-            # An avoided hazard must not mask the next one in the forward
-            # sensor beam while its short re-detection cooldown is active.
+        for obstacle,track in detections:
             if self.avoidance_cooldowns.get(obstacle,0.0)>self.time:
                 continue
-            center=self.predicted_center(obstacle)
+            center=track.position
             delta=sub(center,self.drone)
             along=dot(delta,forward)
             if along<=0 or along>self.SENSOR_RANGE:
                 continue
-            # Predict where a moving object and the drone will be at the
-            # same time. This lets the sensor flag a crossing hazard while
-            # it is still laterally offset, rather than only at the crossing.
             horizon=clamp(along/speed,0.0,max_horizon)
             predicted=None
             for _ in range(3):
-                predicted=self.predicted_center(obstacle,horizon)
+                predicted=track.predict(horizon)
                 projected=sub(predicted,self.drone)
                 predicted_along=dot(projected,forward)
                 if predicted_along<=0 or predicted_along>self.SENSOR_RANGE:
@@ -1059,32 +1196,32 @@ class SkyRouteCity(SkyRoute3D):
             future_along=dot(miss,forward)
             side=length(sub(miss,mul(forward,future_along)))
             collision_margin=self.DRONE_RADIUS+4.0
-            if obstacle.kind=="aircraft":
+            if obstacle.kind in ("aircraft","sphere"):
                 vertical_extent=obstacle.size+collision_margin
                 lateral_extent=obstacle.size+collision_margin
-            elif obstacle.kind=="vehicle":
-                vertical_extent=obstacle.size[2]+collision_margin
-                lateral_extent=max(obstacle.size[0],obstacle.size[1])+collision_margin
-            elif obstacle.kind=="box":
-                vertical_extent=obstacle.size[2]+collision_margin
-                lateral_extent=max(obstacle.size[0],obstacle.size[1])+collision_margin
             else:
-                vertical_extent=obstacle.size+collision_margin
-                lateral_extent=obstacle.size+collision_margin
+                hx,hy,hz=obstacle.size
+                vertical_extent=hz+collision_margin
+                lateral_extent=max(hx,hy)+collision_margin
             if abs(miss[2])>vertical_extent or side>lateral_extent or abs(future_along)>10.0:
                 continue
-            d=length(delta)
-            if d<nearest_distance:
-                nearest,nearest_distance=obstacle,d
+            measured_distance=length(delta)
+            if measured_distance<nearest_distance:
+                nearest,nearest_distance=obstacle,measured_distance
                 nearest_prediction=(predicted,horizon,future_drone)
         self._sensor_prediction=(nearest,*nearest_prediction) if nearest_prediction else None
         return nearest
 
     def begin_sensor_avoidance(self,obstacle,emergency=False):
         self.avoidances+=1
+        self.replan_count=getattr(self,"replan_count",0)+1
+        if emergency:
+            self.collision_risk_events=getattr(self,"collision_risk_events",0)+1
         self.avoidance_focus=obstacle
         self.sensor_target=obstacle
-        self.sensor_reading=distance(self.drone,self.predicted_center(obstacle,.25))
+        track=self._kalman_tracks.get(obstacle)
+        measured_position=track.position if track else obstacle.center
+        self.sensor_reading=distance(self.drone,measured_position)
         self.avoidance_cooldowns[obstacle]=self.time+6.0
         if obstacle.name.startswith("Course hazard"):
             self.detected_course_hazards.add(obstacle.name)
@@ -1096,7 +1233,8 @@ class SkyRouteCity(SkyRoute3D):
         self._planning_obstacle=obstacle
         prediction=self._sensor_prediction
         self._planning_obstacle_center=(prediction[1] if prediction and prediction[0] is obstacle
-                                        else self.predicted_center(obstacle))
+                                        else measured_position)
+        planning_started=perf_counter()
         try:
             if getattr(self,"mission_type",None)=="sensor":
                 gate_index=min(getattr(self,"sensor_gate_index",0),
@@ -1120,6 +1258,9 @@ class SkyRouteCity(SkyRoute3D):
                 path=self.plan_path(self.drone,self.GOAL)
                 planner_name="A*"
         finally:
+            planning_seconds=perf_counter()-planning_started
+            self.replan_compute_total=getattr(self,"replan_compute_total",0.0)+planning_seconds
+            self.replan_compute_samples=getattr(self,"replan_compute_samples",0)+1
             self._planning_obstacle=None
             self._planning_obstacle_center=None
         if path:
@@ -1135,6 +1276,7 @@ class SkyRouteCity(SkyRoute3D):
         else:
             self.route=[]
             self.mode="idle"
+            self.mission_success=False
             self.set_status(f"{planner_name} ROUTE BLOCKED · HOLDING",3.0)
 
     def update(self,dt):
@@ -1149,7 +1291,7 @@ class SkyRouteCity(SkyRoute3D):
             self.velocity=0.0
             return
         if self.mode in ("direct","follow"):
-            obstacle=self.detect_sensor_hazard()
+            obstacle=self.detect_sensor_hazard(dt)
             if obstacle and self.avoidance_cooldowns.get(obstacle,0.0)<=self.time:
                 self.begin_sensor_avoidance(obstacle)
                 return
@@ -1592,7 +1734,7 @@ class SkyRouteCity(SkyRoute3D):
         x,y,z=self.drone
         heading=math.radians(self.heading)
         origin=(x+math.cos(heading)*.48,y+math.sin(heading)*.48,z)
-        for offset in (-32,-18,0,18,32):
+        for offset in self.LIDAR_BEAM_ANGLES:
             angle=heading+math.radians(offset)
             end=(origin[0]+math.cos(angle)*self.SENSOR_RANGE,
                  origin[1]+math.sin(angle)*self.SENSOR_RANGE,
@@ -1600,6 +1742,8 @@ class SkyRouteCity(SkyRoute3D):
             colour=(.94,.54,.20) if offset==0 and self.sensor_target else (.17,.60,.73)
             alpha=.78 if offset==0 else .31
             draw_line(origin,end,colour,1.8 if offset==0 else 1.0,alpha)
+        for _,point in self._lidar_detections:
+            draw_sphere(point,2.2,(.10,.76,.83),10,6,.86)
         if self.sensor_target:
             target=self.sensor_target.center
             draw_line(origin,target,(.96,.48,.18),2.3,.95)
@@ -1628,6 +1772,7 @@ class SkyRouteCity(SkyRoute3D):
         self.ui_rect(26,39,7,7,(.96,.48,.21,1))
         self.ui_rect(self.SIDEBAR+22,h-38,180,24,(.99,.995,1,.88))
         self.ui_rect(self.SIDEBAR+22,h-67,490,20,(.99,.995,1,.88))
+        self.ui_rect(self.SIDEBAR+22,18,500,43,(.99,.995,1,.88))
         self.ui_rect(max(self.SIDEBAR+420,self.width-485),h-42,455,22,(.99,.995,1,.86))
         l=self.labels
         for name,y in (("brand",h-52),("tag",h-74),("live",h-54),("section",h-123),
@@ -1646,6 +1791,17 @@ class SkyRouteCity(SkyRoute3D):
         l["sensor_value"].x=196; l["sensor_value"].y=49
         l["sensor_value"].text=f"LAST DETECTION {self.sensor_reading:.1f}m" if self.avoidances else f"SENSOR RANGE {self.SENSOR_RANGE:.1f}m"
         l["controls"].y=24
+        path_km=getattr(self,"flight_distance",0.0)/1000.0
+        collision_count=getattr(self,"actual_collisions",0)
+        collision_rate=collision_count/max(path_km,1e-6) if path_km>0 else 0.0
+        replan_samples=getattr(self,"replan_compute_samples",0)
+        average_replan_ms=(1000.0*self.replan_compute_total/replan_samples
+                           if replan_samples else 0.0)
+        mission_success=getattr(self,"mission_success",None)
+        success_text="--" if mission_success is None else ("YES" if mission_success else "NO")
+        l["metrics"].x=self.SIDEBAR+34; l["metrics"].y=23
+        l["metrics"].text=(f"PATH {path_km:.2f} km  ·  COLLISIONS {collision_count}  ·  RATE {collision_rate:.2f}/km\n"
+                           f"REPLANS {getattr(self,'replan_count',0)}  ·  AVG {average_replan_ms:.1f} ms  ·  MISSION {success_text}")
         l["world_title"].x=self.SIDEBAR+32; l["world_title"].y=h-31
         l["world_sub"].x=self.SIDEBAR+32; l["world_sub"].y=h-57
         l["goal_tag"].x=self.width-170; l["goal_tag"].y=45
@@ -1760,7 +1916,7 @@ class SkyRouteMission(SkyRouteCity):
         self.labels["button_contact"].text="START SENSOR MISSION"
         self.labels["button_auto"].text="START SAFE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
-        self.labels["mission_sub"].text="Sensor: marked left corridor + D* reroutes · Safe: A*"
+        self.labels["mission_sub"].text="Sensor: LiDAR + Kalman · A* / D* Lite · Safe: A*"
         self.labels["world_sub"].text="4.41 km² · tree-lined streets · 64 moving cars · 12 aerial hazards"
         self.labels["controls"].text="C sensor mode  A safe mode  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
@@ -1784,6 +1940,16 @@ class SkyRouteMission(SkyRouteCity):
         self.sensor_reading=self.SENSOR_RANGE
         self.sensor_target=None
         self.avoidances=0
+        self.mission_started_at=None
+        self.mission_elapsed=0.0
+        self.mission_success=None
+        self.actual_collisions=0
+        self.collision_risk_events=0
+        self.replan_count=0
+        self.replan_compute_total=0.0
+        self.replan_compute_samples=0
+        self.flight_distance=0.0
+        self._collision_latched=False
         self.animate_city()
         self.camera_mode="chase"
         self.camera_distance=220.0
@@ -1797,6 +1963,7 @@ class SkyRouteMission(SkyRouteCity):
         self.camera_distance=220.0
         self.camera_elevation=32.0
         self.mode="takeoff"
+        self.mission_started_at=self.time
         self.set_status("SENSOR MODE · A* RESULTANT PATH · TAKING OFF",2.2)
 
     def run_safe_route(self):
@@ -1805,6 +1972,7 @@ class SkyRouteMission(SkyRouteCity):
         self.camera_mode="chase"
         self.camera_distance=220.0
         self.mode="takeoff"
+        self.mission_started_at=self.time
         self.set_status("SAFE MODE · A* ROUTE · TAKING OFF",2.2)
 
     def plan_sensor_resultant_path(self,start,goal):
@@ -1846,6 +2014,9 @@ class SkyRouteMission(SkyRouteCity):
         self.drone=self.LANDING_PAD
         self.velocity=0.0
         self.mode="complete"
+        self.mission_success=True
+        self.mission_elapsed=(self.time-self.mission_started_at
+                              if self.mission_started_at is not None else 0.0)
         self.route=[self.GOAL,self.LANDING_PAD]
         self.route_index=len(self.route)
         self.set_status("LANDED · MOTORS IDLE",5.0)
@@ -1855,6 +2026,7 @@ class SkyRouteMission(SkyRouteCity):
         remaining=distance(previous,target)
         if remaining<=.045:
             self.drone=target
+            self.flight_distance+=remaining
             self.velocity=0.0
             return True
         move=min(remaining,speed*dt)
@@ -1869,6 +2041,7 @@ class SkyRouteMission(SkyRouteCity):
                 self.set_status("LANDING ZONE BLOCKED · HOLDING",2.0)
             return False
         self.drone=candidate
+        self.flight_distance+=move
         self.velocity=move/max(dt,1e-5)
         horizontal=sub(target,previous)
         if abs(horizontal[0])+abs(horizontal[1])>.001:
@@ -1889,6 +2062,19 @@ class SkyRouteMission(SkyRouteCity):
         if self.contact_flash>0:
             self.contact_flash=max(0.0,self.contact_flash-dt)
 
+        if self.mode in ("takeoff","follow","landing"):
+            contact=self.collides(self.drone,self.DRONE_RADIUS)
+            if contact:
+                if not self._collision_latched:
+                    self.actual_collisions+=1
+                self._collision_latched=True
+                if (self.mode=="follow" and self.mission_type=="sensor" and
+                        self.avoidance_cooldowns.get(contact,0.0)<=self.time):
+                    self.begin_sensor_avoidance(contact,True)
+                    return
+            else:
+                self._collision_latched=False
+
         if self.mode=="takeoff":
             if self.move_drone(self.START,self.TAKEOFF_SPEED,dt):
                 if self.mission_type=="sensor":
@@ -1908,13 +2094,14 @@ class SkyRouteMission(SkyRouteCity):
                 else:
                     self.mode="idle"
                     self.drone=self.START_PAD
+                    self.mission_success=False
                     self.set_status("NO A* RESULTANT ROUTE · RETURNED TO PAD",3.0)
             return
 
         if self.mode in ("direct","follow"):
             if self.mode=="follow" and self.mission_type=="sensor":
                 self.advance_sensor_gate()
-            obstacle=self.detect_sensor_hazard()
+            obstacle=self.detect_sensor_hazard(dt)
             if obstacle and self.avoidance_cooldowns.get(obstacle,0.0)<=self.time:
                 self.begin_sensor_avoidance(obstacle)
                 return
@@ -1991,7 +2178,6 @@ class SkyRouteMission(SkyRouteCity):
 if __name__=="__main__":
     app=SkyRouteMission()
     pyglet.app.run()
-
 
 
 
