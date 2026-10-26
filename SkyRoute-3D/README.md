@@ -4,7 +4,7 @@ SkyRoute is a native OpenGL desktop simulation for an autonomous drone mission i
 
 ## Mission
 
-The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. Sensor Mode follows the curved left-side A* corridor shown in the route markup, with mandatory checkpoints through the hazard field while leaving unseen course hazards unknown. The moving hazard course is aligned to that corridor. When sensors predict a collision risk, D* Lite marks the predicted encounter point as blocked, reroutes to a checkpoint beyond that hazard, then rejoins the remaining A* route through the corridor. This keeps the mission inside the obstacle field instead of routing around the entire zone. Safe Mode plans an A* clearance route around the known obstacle map before flight. Both modes land on the rooftop pad and stop the rotors instead of hovering.
+The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. Sensor Mode first computes an A* resultant route through the marked hazard corridor. A simulated nine-beam LiDAR scan supplies noisy obstacle position samples, and a three-axis constant-velocity Kalman filter estimates position and velocity. The simulator predicts future obstacle positions and checks the drone's projected path against a safety distance. Only when a predicted collision risk occurs does D* Lite update the local obstacle map, replan around the detected hazard and rejoin the remaining A* route. Unseen course hazards remain unknown until sensed. Safe Mode plans an A* clearance route around the known obstacle map before flight. Both modes land on the rooftop pad and stop the rotors instead of hovering.
 
 ## Run
 
@@ -30,6 +30,9 @@ Both Sensor Mode and Safe Mode start in chase view. The camera label at the top 
 - 80 varied buildings with multi-floor windows, reflective glazing, roof parapets and rooftop equipment.
 - 64 moving cars, 152 varied roadside trees, 14 sidewalk pedestrians and 12 moving course hazards. The hazards use seeded variation in direction, crossing axis, speed and distance so their motion is repeatable but not synchronized.
 - Sensor Mode follows the curved left-side A* resultant path through the hazard field from takeoff. Only when the sensors predict collision risk does D* Lite update the map and compute a local reroute to a checkpoint beyond that hazard; it then resumes the marked A* corridor. The original A* route stays visible as a faint reference during rerouting. The HUD counts unique course hazards sensed out of 12.
+- LiDAR uses nine forward-facing horizontal beams across a 64° field of view, 180 m range, and seeded 1.5 m standard-deviation measurement noise. The Kalman filter estimates all three position and velocity components from those returns; collision-risk checks use the estimates, not the obstacle's scripted future position.
+- The evaluation HUD reports flown path length, physical collision count and collisions per kilometre, number of replans, average planner computation time, and mission success. Risk warnings and avoided contacts remain separate from physical collisions.
+- To vary the experiment, change `COURSE_HAZARD_COUNT` (1–12) and `HAZARD_SPEED_SCALE` in `skyroute3d.py`. The LiDAR range, beam angles, and measurement noise are configurable beside them.
 - Safe Mode uses A* to plan a clearance route around known obstacles before takeoff.
 - D* Lite follows Koenig and Likhachev, AAAI 2002: [D* Lite paper](https://ocs.aaai.org/Library/AAAI/2002/aaai02-072.php).
 - Mission stages: launch, vertical takeoff, cruise, landing approach, touchdown and motors idle.
@@ -43,4 +46,3 @@ The city is procedural and has a Central Park-scale footprint; it is not a geore
 - `run_skyroute.bat` — Windows launcher.
 - `requirements.txt` — pinned Pyglet dependency.
 - `vendor/pyglet` — bundled windowing and OpenGL library.
-
