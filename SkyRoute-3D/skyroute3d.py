@@ -566,10 +566,12 @@ class SkyRouteCity(SkyRoute3D):
         l["impact_tag"].color=(177,104,29,255)
         l["camera"]=pyglet.text.Label("CAMERA  1 ORBIT  ·  2 CHASE  ·  3 PILOT  ·  4 TOP",
             x=0,y=0,font_name="Arial",font_size=8,weight="bold",color=(81,101,124,255))
+        l["sensor_value"]=pyglet.text.Label("RANGE 7.4m",x=186,y=49,font_name="Arial",font_size=8,weight="bold",color=(81,101,124,255))
 
     def reset(self):
         super().reset()
         self.avoidances=0
+        self.sensor_reading=self.SENSOR_RANGE
         self.sensor_target=None
         self.avoidance_focus=None
         self.avoidance_cooldowns.clear()
@@ -687,10 +689,11 @@ class SkyRouteCity(SkyRoute3D):
         self.avoidances+=1
         self.avoidance_focus=obstacle
         self.sensor_target=obstacle
+        self.sensor_reading=distance(self.drone,self.predicted_center(obstacle,.25))
         self.avoidance_cooldowns[obstacle]=self.time+4.5
         self.velocity=0.0
         label="PROXIMITY WARNING" if emergency else "RANGE SENSOR DETECTED"
-        self.set_status(f"{label} · {obstacle.name.upper()} · REROUTING",3.0)
+        self.set_status(f"{label} · {obstacle.name.upper()} AT {self.sensor_reading:.1f}M · REROUTING",3.0)
         self.direct_target=None
         self.mode="replan"
         path=self.plan_path(self.drone,self.GOAL)
@@ -1045,13 +1048,15 @@ class SkyRouteCity(SkyRoute3D):
         l["speed"].y=94; l["speed"].text=f"{self.velocity:.1f} m/s"
         l["contact_head"].y=52; l["contact_head"].text="SENSOR AVOIDANCES"
         l["contact_count"].y=49; l["contact_count"].text=str(self.avoidances)
+        l["sensor_value"].x=186; l["sensor_value"].y=49
+        l["sensor_value"].text=f"LAST DETECTION {self.sensor_reading:.1f}m" if self.avoidances else f"SENSOR RANGE {self.SENSOR_RANGE:.1f}m"
         l["controls"].y=24
         l["world_title"].x=self.SIDEBAR+32; l["world_title"].y=h-31
         l["world_sub"].x=self.SIDEBAR+32; l["world_sub"].y=h-57
         l["goal_tag"].x=self.width-170; l["goal_tag"].y=45
         l["impact_tag"].x=self.SIDEBAR+28; l["impact_tag"].y=h-91
         if self.sensor_target and self.avoidances:
-            l["impact_tag"].text=f"RANGE SENSOR  ·  {self.sensor_target.name.upper()}  ·  AVOIDED"
+            l["impact_tag"].text=f"RANGE SENSOR  ·  {self.sensor_target.name.upper()}  ·  {self.sensor_reading:.1f}M  ·  AVOIDED"
         elif self.avoidances:
             l["impact_tag"].text=f"{self.avoidances} SENSOR AVOIDANCE EVENT(S)"
         else:
@@ -1122,6 +1127,8 @@ class SkyRouteCity(SkyRoute3D):
 if __name__=="__main__":
     app=SkyRouteCity()
     pyglet.app.run()
+
+
 
 
 
