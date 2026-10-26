@@ -22,14 +22,15 @@ Double-click `run_skyroute.bat`. Python 3.10 or newer is required. Pyglet 2.1.19
 - `4` — overhead view following the drone.
 - `5` — full city overview.
 
-The camera label at the top right also cycles through the views when clicked.
+Both Sensor Mode and Safe Mode start in chase view. The camera label at the top right also cycles through the views when clicked.
 
 ## Simulation details
 
 - City footprint: 4.2 km × 1.05 km (4.41 km²), with a 20-by-4 block grid.
 - 80 varied buildings with multi-floor windows, reflective glazing, roof parapets and rooftop equipment.
-- 22 moving vehicles, 14 sidewalk pedestrians and 12 moving course hazards. The hazards use seeded variation in direction, crossing axis, speed and distance so their motion is repeatable but not synchronized.
-- Forward sensors predict near-future intersections and make a short local sidestep around each detected hazard before rejoining the original direct course. Upcoming detections are queued if they enter sensor range during a sidestep; the HUD counts unique course hazards sensed out of 12.
+- 64 moving cars, 152 varied roadside trees, 14 sidewalk pedestrians and 12 moving course hazards. The hazards use seeded variation in direction, crossing axis, speed and distance so their motion is repeatable but not synchronized.
+- Sensor Mode stays on the direct course until prediction puts an obstacle inside the drone's collision envelope plus a small clearance margin. It then makes a short local sidestep, queues additional sensed risks, and rejoins the direct course. The HUD counts unique course hazards sensed out of 12.
+- Safe Mode uses A* to plan a clearance route around known obstacles before takeoff.
 - Mission stages: launch, vertical takeoff, cruise, landing approach, touchdown and motors idle.
 - Four-plus camera angles with a separate full-city view.
 
