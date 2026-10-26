@@ -756,6 +756,10 @@ class SkyRouteCity(SkyRoute3D):
     def route_aim(self):
         if self.mode=="direct":
             return self.direct_target or self.GOAL
+        if self.mode=="follow" and getattr(self,"sensor_avoidance_route",False):
+            # Keep scanning down the original course while making a short
+            # sidestep, so upcoming hazards can be queued in advance.
+            return self.GOAL
         if self.mode=="follow" and self.route:
             while self.route_index<len(self.route) and distance(self.drone,self.route[self.route_index])<.12:
                 self.route_index+=1
@@ -822,6 +826,19 @@ class SkyRouteCity(SkyRoute3D):
         return nearest
 
     def begin_sensor_avoidance(self,obstacle,emergency=False):
+        if (getattr(self,"mission_type",None)=="sensor"
+                and getattr(self,"sensor_avoidance_route",False)
+                and obstacle is not self.active_avoidance_obstacle
+                and not emergency):
+            if obstacle not in self.pending_sensor_hazards:
+                self.pending_sensor_hazards.append(obstacle)
+                self.avoidance_cooldowns[obstacle]=self.time+6.0
+                if obstacle.name.startswith("Course hazard"):
+                    self.detected_course_hazards.add(obstacle.name)
+                self.sensor_target=obstacle
+                self.sensor_reading=distance(self.drone,self.predicted_center(obstacle,.25))
+                self.set_status(f"RANGE SENSOR · {obstacle.name.upper()} QUEUED · DIRECT COURSE HELD",2.6)
+            return
         self.drone=self.drone
         self.avoidances+=1
         self.avoidance_focus=obstacle
@@ -835,6 +852,15 @@ class SkyRouteCity(SkyRoute3D):
         self.set_status(f"{label} · {obstacle.name.upper()} AT {self.sensor_reading:.1f}M · REROUTING",3.0)
         self.direct_target=None
         self.mode="replan"
+        if (getattr(self,"mission_type",None)=="sensor"
+                and hasattr(self,"make_local_avoidance_route")):
+            self.active_avoidance_obstacle=obstacle
+            self.route=self.make_local_avoidance_route(obstacle)
+            self.route_index=1
+            self.sensor_avoidance_route=True
+            self.mode="follow"
+            self.set_status(f"RANGE SENSOR · {obstacle.name.upper()} · LOCAL SIDESTEP · DIRECT COURSE",3.0)
+            return
         self._planning_obstacle=obstacle
         try:
             path=self.plan_path(self.drone,self.GOAL)
@@ -1455,11 +1481,11 @@ class SkyRouteMission(SkyRouteCity):
     def make_labels(self):
         super().make_labels()
         self.labels["button_contact"].text="START SENSOR MISSION"
-        self.labels["button_auto"].text="START SAFE MISSION"
+        self.labels["button_auto"].text="START CHASE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
-        self.labels["mission_sub"].text="1.5 km route · takeoff · touchdown"
+        self.labels["mission_sub"].text="1.5 km direct course · local sidesteps · landing"
         self.labels["world_sub"].text="4.2 km long · 4.41 km² downtown · dynamic traffic · sensor rerouting · rooftop landing"
-        self.labels["controls"].text="C sensor mission  A safe mission  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
+        self.labels["controls"].text="C sensor mission  A chase launch  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
     def reset(self):
         super().reset()
@@ -1472,6 +1498,9 @@ class SkyRouteMission(SkyRouteCity):
         self.route_index=0
         self.direct_target=None
         self.mission_type="sensor"
+        self.sensor_avoidance_route=False
+        self.active_avoidance_obstacle=None
+        self.pending_sensor_hazards=[]
         self.sensor_reading=self.SENSOR_RANGE
         self.sensor_target=None
         self.avoidances=0
@@ -1483,18 +1512,53 @@ class SkyRouteMission(SkyRouteCity):
     def run_contact_demo(self):
         self.reset()
         self.mission_type="sensor"
-        self.camera_mode="chase"
-        self.camera_distance=220.0
+        self.camera_mode="overview"
+        self.camera_distance=4600.0
         self.mode="takeoff"
-        self.set_status("MOTOR START · TAKING OFF",2.2)
+        self.set_status("DIRECT SENSOR MISSION · TAKING OFF",2.2)
 
     def run_safe_route(self):
+        # Both launch buttons fly the direct course. The second simply starts
+        # with the chase camera instead of globally planning a safe route.
         self.reset()
-        self.mission_type="safe"
+        self.mission_type="sensor"
         self.camera_mode="chase"
         self.camera_distance=220.0
         self.mode="takeoff"
-        self.set_status("MOTOR START · TAKING OFF",2.2)
+        self.set_status("DIRECT SENSOR MISSION · CHASE VIEW",2.2)
+
+    def make_local_avoidance_route(self,obstacle):
+        forward=unit(sub(self.GOAL,self.START))
+        side=(-forward[1],forward[0],0.0)
+        horizon=clamp(self.sensor_reading/max(1.0,self.CRUISE_SPEED),
+                      0.0,self.SENSOR_RANGE/max(1.0,self.CRUISE_SPEED))
+        predicted=self.predicted_center(obstacle,horizon)
+        along=clamp(dot(sub(predicted,self.drone),forward),28.0,self.SENSOR_RANGE+25.0)
+        if obstacle.kind in ("sphere","aircraft"):
+            extent=obstacle.size
+        else:
+            extent=max(obstacle.size[0],obstacle.size[1])
+        lead=max(27.0,extent+20.0)
+        lateral=max(25.0,extent+self.DRONE_RADIUS+12.0)
+        before=max(12.0,along-lead)
+        after=along+lead
+        rejoin=min(after+18.0,self.SENSOR_RANGE+60.0)
+        preferred=1.0 if self.avoidances%2 else -1.0
+
+        def make_points(offset,vertical=0.0):
+            a=add(add(self.drone,mul(forward,before)),
+                  add(mul(side,offset),(0.0,0.0,vertical)))
+            b=add(add(self.drone,mul(forward,after)),
+                  add(mul(side,offset),(0.0,0.0,vertical)))
+            c=add(self.drone,mul(forward,rejoin))
+            return [self.drone,a,b,c]
+
+        for sign in (preferred,-preferred):
+            route=make_points(sign*lateral)
+            if all(not self.collides(point,self.DRONE_RADIUS+2.0) for point in route[1:]):
+                return route
+        # If both sides are occupied, climb briefly and rejoin the direct line.
+        return make_points(0.0,max(28.0,extent+18.0))
 
     def begin_landing(self):
         self.drone=(self.GOAL[0],self.GOAL[1],max(self.GOAL[2],self.drone[2]))
@@ -1588,6 +1652,21 @@ class SkyRouteMission(SkyRouteCity):
             while self.route_index<len(self.route) and distance(self.drone,self.route[self.route_index])<.12:
                 self.route_index+=1
             if self.route_index>=len(self.route):
+                if self.sensor_avoidance_route:
+                    self.sensor_avoidance_route=False
+                    self.active_avoidance_obstacle=None
+                    self.route=[]
+                    self.route_index=0
+                    self.mode="direct"
+                    self.direct_target=self.GOAL
+                    self.set_status("CLEAR OF HAZARD · RESUMING DIRECT COURSE",2.5)
+                    while self.pending_sensor_hazards:
+                        next_obstacle=self.pending_sensor_hazards.pop(0)
+                        course_forward=unit(sub(self.GOAL,self.START))
+                        if dot(sub(self.predicted_center(next_obstacle),self.drone),course_forward)>0:
+                            self.begin_sensor_avoidance(next_obstacle)
+                            return
+                    return
                 self.begin_landing()
                 return
             self.move_drone(self.route[self.route_index],self.CRUISE_SPEED,dt)
@@ -1604,12 +1683,14 @@ class SkyRouteMission(SkyRouteCity):
     def status_for_mode(self):
         if self.paused:
             return "SIMULATION PAUSED"
+        if self.mode=="follow" and self.sensor_avoidance_route:
+            return "LOCAL SIDESTEP · REJOINING DIRECT COURSE"
         return {
             "idle":"READY · ON LAUNCH PAD",
             "takeoff":"TAKING OFF · CLIMBING TO ROUTE ALTITUDE",
             "direct":"CRUISING · SENSORS ACTIVE",
             "replan":"RANGE SENSOR · REPLANNING",
-            "follow":"FOLLOWING SENSOR-SAFE ROUTE",
+            "follow":"FOLLOWING ROUTE",
             "landing":"LANDING · DESCENDING TO PAD",
             "complete":"LANDED · MOTORS IDLE",
         }.get(self.mode,"READY · ON LAUNCH PAD")
