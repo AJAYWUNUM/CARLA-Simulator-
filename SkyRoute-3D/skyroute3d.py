@@ -1481,11 +1481,11 @@ class SkyRouteMission(SkyRouteCity):
     def make_labels(self):
         super().make_labels()
         self.labels["button_contact"].text="START SENSOR MISSION"
-        self.labels["button_auto"].text="START CHASE MISSION"
+        self.labels["button_auto"].text="START SAFE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
-        self.labels["mission_sub"].text="1.5 km direct course · local sidesteps · landing"
+        self.labels["mission_sub"].text="Sensor: direct · Safe: planned · rooftop landing"
         self.labels["world_sub"].text="4.2 km long · 4.41 km² downtown · dynamic traffic · sensor rerouting · rooftop landing"
-        self.labels["controls"].text="C sensor mission  A chase launch  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
+        self.labels["controls"].text="C sensor mode  A safe mode  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
     def reset(self):
         super().reset()
@@ -1518,14 +1518,12 @@ class SkyRouteMission(SkyRouteCity):
         self.set_status("DIRECT SENSOR MISSION · TAKING OFF",2.2)
 
     def run_safe_route(self):
-        # Both launch buttons fly the direct course. The second simply starts
-        # with the chase camera instead of globally planning a safe route.
         self.reset()
-        self.mission_type="sensor"
+        self.mission_type="safe"
         self.camera_mode="chase"
         self.camera_distance=220.0
         self.mode="takeoff"
-        self.set_status("DIRECT SENSOR MISSION · CHASE VIEW",2.2)
+        self.set_status("SAFE MODE · TAKING OFF",2.2)
 
     def make_local_avoidance_route(self,obstacle):
         forward=unit(sub(self.GOAL,self.START))
@@ -1685,6 +1683,8 @@ class SkyRouteMission(SkyRouteCity):
             return "SIMULATION PAUSED"
         if self.mode=="follow" and self.sensor_avoidance_route:
             return "LOCAL SIDESTEP · REJOINING DIRECT COURSE"
+        if self.mode=="follow" and self.mission_type=="safe":
+            return "FOLLOWING SAFE PLANNED ROUTE"
         return {
             "idle":"READY · ON LAUNCH PAD",
             "takeoff":"TAKING OFF · CLIMBING TO ROUTE ALTITUDE",
