@@ -527,6 +527,7 @@ class SkyRouteCity(SkyRoute3D):
     GRID_STEP = 50.0
     SENSOR_RANGE = 180.0
     COURSE_HAZARD_COUNT = 12
+    CITY_CAR_COUNT = 64
 
     def __init__(self):
         self.camera_mode = "overview"
@@ -546,6 +547,20 @@ class SkyRouteCity(SkyRoute3D):
     def make_obstacles(self):
         rng = random.Random(41216)
         buildings = []
+        tree_rng = random.Random(8127)
+        foliage_palette = [(.22,.43,.30),(.27,.50,.33),(.34,.55,.36),(.40,.59,.38)]
+        self.trees=[]
+        for x in range(-1890,1891,210):
+            for y in range(-315,316,210):
+                for side in (-1,1):
+                    self.trees.append((
+                        x+side*25.0,y,
+                        tree_rng.uniform(9.5,14.0),
+                        tree_rng.uniform(4.6,6.2),
+                        foliage_palette[tree_rng.randrange(len(foliage_palette))],
+                        foliage_palette[tree_rng.randrange(len(foliage_palette))],
+                        tree_rng.uniform(.4,1.4),
+                    ))
         facade_palette = [
             (.72,.76,.80), (.84,.81,.75), (.76,.83,.85),
             (.83,.78,.72), (.70,.75,.82), (.88,.86,.81),
@@ -575,7 +590,7 @@ class SkyRouteCity(SkyRoute3D):
                        (.25,.38,.34), (.78,.57,.24), (.31,.34,.40)]
         avenue_x = list(range(-2100, 2101, 210))
         avenue_y = list(range(-420, 421, 210))
-        for i in range(22):
+        for i in range(self.CITY_CAR_COUNT):
             axis = i % 2
             lane = -8.0 if (i//2) % 2 == 0 else 8.0
             speed = rng.uniform(.011, .018)
@@ -806,18 +821,19 @@ class SkyRouteCity(SkyRoute3D):
             miss=sub(predicted,future_drone)
             future_along=dot(miss,forward)
             side=length(sub(miss,mul(forward,future_along)))
+            collision_margin=self.DRONE_RADIUS+4.0
             if obstacle.kind=="aircraft":
-                vertical_extent=obstacle.size+12.0
-                lateral_extent=obstacle.size+15.0
+                vertical_extent=obstacle.size+collision_margin
+                lateral_extent=obstacle.size+collision_margin
             elif obstacle.kind=="vehicle":
-                vertical_extent=obstacle.size[2]+12.0
-                lateral_extent=max(obstacle.size[0],obstacle.size[1])+15.0
+                vertical_extent=obstacle.size[2]+collision_margin
+                lateral_extent=max(obstacle.size[0],obstacle.size[1])+collision_margin
             elif obstacle.kind=="box":
-                vertical_extent=obstacle.size[2]+12.0
-                lateral_extent=max(obstacle.size[0],obstacle.size[1])+15.0
+                vertical_extent=obstacle.size[2]+collision_margin
+                lateral_extent=max(obstacle.size[0],obstacle.size[1])+collision_margin
             else:
-                vertical_extent=obstacle.size+12.0
-                lateral_extent=obstacle.size+15.0
+                vertical_extent=obstacle.size+collision_margin
+                lateral_extent=obstacle.size+collision_margin
             if abs(miss[2])>vertical_extent or side>lateral_extent or abs(future_along)>10.0:
                 continue
             d=length(delta)
@@ -1206,16 +1222,17 @@ class SkyRouteCity(SkyRoute3D):
     def draw_street_furniture(self):
         focus=self.camera_focus()
         visibility=350.0+min(self.camera_distance*.25,700.0)
-        # Trees mark neighborhood streets and break up the hard roof grid.
-        for x in range(-1890,1891,420):
-            for y in range(-315,316,210):
-                for side in (-1,1):
-                    tx=x+side*25.0
-                    if math.hypot(tx-focus[0],y-focus[1])>visibility:
-                        continue
-                    draw_tube((tx,y,.10),(tx,y,8.0),.42,(.36,.29,.22))
-                    draw_sphere((tx,y,10.4),3.5,(.35,.53,.40),14,8)
-                    draw_sphere((tx+1.1,y-.5,11.7),2.2,(.43,.61,.47),12,7)
+        # Larger, varied roadside trees make the city greenery visible from
+        # the chase camera as well as from the full-city view.
+        for tx,ty,height,crown,leaf_a,leaf_b,branch in self.trees:
+            if math.hypot(tx-focus[0],ty-focus[1])>visibility:
+                continue
+            trunk_top=height*.73
+            draw_tube((tx,ty,.10),(tx,ty,trunk_top),.56,(.34,.24,.15))
+            draw_tube((tx,ty,height*.52),(tx+branch,ty+.35,height*.83),.25,(.36,.26,.16))
+            draw_sphere((tx,ty,height*.82),crown*.72,leaf_a,16,10)
+            draw_sphere((tx+branch,ty+.3,height*.98),crown*.54,leaf_b,14,9)
+            draw_sphere((tx-branch*.65,ty-.45,height*.94),crown*.50,leaf_a,14,9)
         # Tall modern streetlights at regular intervals along the avenues.
         for x in range(-1890,1891,420):
             for y in range(-315,316,210):
@@ -1484,7 +1501,7 @@ class SkyRouteMission(SkyRouteCity):
         self.labels["button_auto"].text="START SAFE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
         self.labels["mission_sub"].text="Sensor: direct · Safe: planned · rooftop landing"
-        self.labels["world_sub"].text="4.2 km long · 4.41 km² downtown · dynamic traffic · sensor rerouting · rooftop landing"
+        self.labels["world_sub"].text="4.41 km² · tree-lined streets · 64 moving cars · 12 aerial hazards"
         self.labels["controls"].text="C sensor mode  A safe mode  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
     def reset(self):
@@ -1505,15 +1522,17 @@ class SkyRouteMission(SkyRouteCity):
         self.sensor_target=None
         self.avoidances=0
         self.animate_city()
-        self.camera_mode="overview"
-        self.camera_distance=4600.0
+        self.camera_mode="chase"
+        self.camera_distance=220.0
+        self.camera_elevation=32.0
         self.set_status("READY · ON LAUNCH PAD",2.5)
 
     def run_contact_demo(self):
         self.reset()
         self.mission_type="sensor"
-        self.camera_mode="overview"
-        self.camera_distance=4600.0
+        self.camera_mode="chase"
+        self.camera_distance=220.0
+        self.camera_elevation=32.0
         self.mode="takeoff"
         self.set_status("DIRECT SENSOR MISSION · TAKING OFF",2.2)
 
