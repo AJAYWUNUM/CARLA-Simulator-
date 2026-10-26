@@ -568,7 +568,7 @@ class SkyRoute3D(pyglet.window.Window):
 
 
 class UrbanObstacle(Obstacle):
-    """City object with optional smooth back-and-forth motion."""
+    """City object with optional smooth, multi-axis motion."""
     def __init__(self, name, kind, center, size, colour, motion=None):
         super().__init__(name, kind, center, size, colour, False)
         self.motion = motion
@@ -852,15 +852,24 @@ class SkyRouteCity(SkyRoute3D):
         cruise_speed = 35.0
         course_rng = random.Random(41217)
 
-        def course_motion(fraction, lateral_range, angular_speed, axis, direction):
+        def course_motion(fraction,lateral_range,angular_speed,axis,direction,
+                          cross_amplitude,cross_speed,cross_direction,
+                          vertical_amplitude,vertical_speed):
             route_point=self.course_route_point(fraction)
             point=route_point
             encounter_time=takeoff_time+distance(self.START,route_point)/cruise_speed
-            # At the expected encounter time, sin(angle) is zero: the hazard
-            # crosses the route in either the positive or negative direction.
+            # Each hazard crosses the nominal route at its scheduled encounter,
+            # while a second lateral oscillation and altitude bob make its
+            # approach visibly three-dimensional and non-identical.
             phase=-angular_speed*encounter_time+(math.pi if direction<0 else 0.0)
+            cross_phase=-cross_speed*encounter_time+(math.pi if cross_direction<0 else 0.0)
+            vertical_phase=-vertical_speed*encounter_time
             coordinate=point[axis]
-            return point,(axis,coordinate-lateral_range,coordinate+lateral_range,angular_speed,phase)
+            cross_axis=1-axis
+            motion=(axis,coordinate-lateral_range,coordinate+lateral_range,angular_speed,phase,
+                    cross_axis,cross_amplitude,cross_speed,cross_phase,
+                    vertical_amplitude,vertical_speed,vertical_phase)
+            return point,motion
 
         hazard_specs = [
             *((fraction,"aircraft",1.2,(.91,.34,.22),"crossing UAV")
@@ -874,9 +883,18 @@ class SkyRouteCity(SkyRoute3D):
         for number,(fraction,kind,size,colour,description) in enumerate(hazard_specs,1):
             axis=course_rng.choice((0,1))
             direction=course_rng.choice((-1,1))
-            lateral_range=course_rng.uniform(48.0,76.0)
-            angular_speed=course_rng.uniform(.025,.050)*self.HAZARD_SPEED_SCALE
-            point,motion=course_motion(fraction,lateral_range,angular_speed,axis,direction)
+            cross_direction=course_rng.choice((-1,1))
+            lateral_range=course_rng.uniform(60.0,105.0)
+            is_aircraft=kind=="aircraft"
+            angular_speed=course_rng.uniform(.10,.18) if is_aircraft else course_rng.uniform(.065,.12)
+            angular_speed*=self.HAZARD_SPEED_SCALE
+            cross_amplitude=course_rng.uniform(12.0,32.0)
+            cross_speed=course_rng.uniform(.62,.98)*angular_speed
+            vertical_amplitude=course_rng.uniform(5.0,11.0) if is_aircraft else course_rng.uniform(2.0,5.0)
+            vertical_speed=course_rng.uniform(.68,1.12)*angular_speed
+            point,motion=course_motion(fraction,lateral_range,angular_speed,axis,direction,
+                                       cross_amplitude,cross_speed,cross_direction,
+                                       vertical_amplitude,vertical_speed)
             buildings.append(UrbanObstacle(f"Course hazard {number:02d} · {description}",
                                             kind,point,size,colour,motion=motion))
 
@@ -962,11 +980,29 @@ class SkyRouteCity(SkyRoute3D):
     def predicted_center(self,obstacle,horizon=1.25):
         if not obstacle.motion:
             return obstacle.center
-        axis,lower,upper,speed,phase=obstacle.motion
+        center,_=self.obstacle_motion_state(obstacle,self.time+horizon)
+        return center
+
+    @staticmethod
+    def obstacle_motion_state(obstacle,at_time):
+        """Evaluate a moving city's position and velocity at a given time."""
+        motion=obstacle.motion
+        axis,lower,upper,speed,phase=motion[:5]
         center=list(obstacle.home)
-        u=(math.sin((self.time+horizon)*speed+phase)+1.0)*.5
-        center[axis]=lower+u*(upper-lower)
-        return tuple(center)
+        velocity=[0.0,0.0,0.0]
+        angle=at_time*speed+phase
+        span=upper-lower
+        center[axis]=lower+(math.sin(angle)+1.0)*.5*span
+        velocity[axis]=.5*span*speed*math.cos(angle)
+        if len(motion)>=12:
+            cross_axis,cross_amplitude,cross_speed,cross_phase,vertical_amplitude,vertical_speed,vertical_phase=motion[5:12]
+            cross_angle=at_time*cross_speed+cross_phase
+            vertical_angle=at_time*vertical_speed+vertical_phase
+            center[cross_axis]=obstacle.home[cross_axis]+cross_amplitude*math.sin(cross_angle)
+            center[2]=obstacle.home[2]+vertical_amplitude*math.sin(vertical_angle)
+            velocity[cross_axis]=cross_amplitude*cross_speed*math.cos(cross_angle)
+            velocity[2]=vertical_amplitude*vertical_speed*math.cos(vertical_angle)
+        return tuple(center),tuple(velocity)
 
     def collides(self,point,clearance=0.0):
         px,py,pz=point
@@ -1072,17 +1108,10 @@ class SkyRouteCity(SkyRoute3D):
         for obstacle in self.obstacles:
             if not obstacle.motion:
                 continue
-            axis,lower,upper,speed,phase=obstacle.motion
-            angle=self.time*speed+phase
-            u=(math.sin(angle)+1.0)*.5
-            center=list(obstacle.home)
-            center[axis]=lower+u*(upper-lower)
-            obstacle.center=tuple(center)
-            direction=math.cos(angle)
-            if axis==0:
-                obstacle.heading=0.0 if direction>=0 else 180.0
-            else:
-                obstacle.heading=90.0 if direction>=0 else -90.0
+            center,velocity=self.obstacle_motion_state(obstacle,self.time)
+            obstacle.center=center
+            if math.hypot(velocity[0],velocity[1])>1e-5:
+                obstacle.heading=math.degrees(math.atan2(velocity[1],velocity[0]))
 
     def route_aim(self):
         if self.mode=="direct":
