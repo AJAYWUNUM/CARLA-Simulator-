@@ -865,7 +865,7 @@ class SkyRouteCity(SkyRoute3D):
         hazard_specs = [
             *((fraction,"aircraft",1.2,(.91,.34,.22),"crossing UAV")
               for fraction in (.12,.27,.42,.58,.73,.88)),
-            *((fraction,"sphere",4.0,(.95,.67,.18),"sensor balloon")
+            *((fraction,"aircraft",1.45,(.95,.67,.18),"inspection UAV")
               for fraction in (.19,.50,.81)),
             *((fraction,"box",(5.5,3.5,2.5),(.82,.30,.22),"work platform")
               for fraction in (.34,.66,.94)),
@@ -1724,8 +1724,6 @@ class SkyRouteCity(SkyRoute3D):
                 glVertex3f(a[0],a[1],a[2]+2.0)
                 glVertex3f(b[0],b[1],b[2]+2.0)
             glEnd()
-            for p in self.route[1:-1]:
-                draw_sphere((p[0],p[1],p[2]+2.0),2.2,(.08,.63,.70),10,6)
         glLineWidth(1.0)
 
     def draw_sensor_rays(self):
@@ -1743,7 +1741,11 @@ class SkyRouteCity(SkyRoute3D):
             alpha=.78 if offset==0 else .31
             draw_line(origin,end,colour,1.8 if offset==0 else 1.0,alpha)
         for _,point in self._lidar_detections:
-            draw_sphere(point,2.2,(.10,.76,.83),10,6,.86)
+            marker=2.0
+            draw_line((point[0]-marker,point[1],point[2]),
+                      (point[0]+marker,point[1],point[2]),(.10,.76,.83),1.5,.86)
+            draw_line((point[0],point[1]-marker,point[2]),
+                      (point[0],point[1]+marker,point[2]),(.10,.76,.83),1.5,.86)
         if self.sensor_target:
             track=self._kalman_tracks.get(self.sensor_target)
             target=track.position if track else self.sensor_target.center
