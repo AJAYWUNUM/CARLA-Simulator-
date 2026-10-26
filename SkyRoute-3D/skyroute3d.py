@@ -2,6 +2,7 @@
 from __future__ import annotations
 import heapq
 import math
+import random
 import sys
 from pathlib import Path
 
@@ -394,8 +395,11 @@ class SkyRoute3D(pyglet.window.Window):
 
     def draw_drone(self):
         x,y,z=self.drone
-        draw_circle_xy((x,y,.055),.53,(.42,.51,.60),1,.25)
-        glPushMatrix(); glTranslatef(x,y,z+.07*math.sin(self.time*5)); glRotatef(self.heading,0,0,1)
+        shadow_radius=.7+min(z*.055,24.0)
+        shadow_alpha=clamp(.19-z*.0007,.035,.19)
+        draw_circle_xy((x,y,.055),shadow_radius,(.33,.39,.46),1.2,shadow_alpha)
+        bob=0.0 if self.mode in ("idle","complete") else .07*math.sin(self.time*5)
+        glPushMatrix(); glTranslatef(x,y,z+bob); glRotatef(self.heading,0,0,1)
         arms=((.72,.72,0),(.72,-.72,0),(-.72,.72,0),(-.72,-.72,0))
         for p in arms: draw_tube((0,0,0),p,.074,(.24,.30,.38))
         draw_box((0,0,.02),(.39,.30,.15),(.91,.94,.97))
@@ -407,7 +411,7 @@ class SkyRoute3D(pyglet.window.Window):
             draw_cylinder(.145,.14,(.22,.27,.34),16)
             draw_sphere((0,0,.15),.09,(.16,.21,.28),12,7)
             glPushMatrix(); glTranslatef(0,0,.205)
-            glRotatef(self.time*1100+px*300+py*240,0,0,1)
+            glRotatef((self.time*1100 if self.mode not in ("idle","complete") else 0.0)+px*300+py*240,0,0,1)
             draw_box((0,0,0),(.50,.035,.018),(.16,.22,.29))
             glPopMatrix(); glPopMatrix()
         for side in (-1,1):
@@ -512,61 +516,147 @@ class UrbanObstacle(Obstacle):
 
 class SkyRouteCity(SkyRoute3D):
     """Urban sensor-avoidance scenario with moving traffic and camera presets."""
-    START = (-13.0, 0.0, 3.3)
-    GOAL = (13.0, 0.0, 3.3)
-    WORLD_MIN = (-15.0, -12.0, 0.75)
-    WORLD_MAX = (15.0, 12.0, 10.5)
-    GRID_STEP = 0.82
-    SENSOR_RANGE = 7.4
+    # 4.2 km x 1.05 km = 4.41 km², with a long axis like Central Park.
+    MAP_HALF_X = 2100.0
+    MAP_HALF_Y = 525.0
+    BLOCK_SPACING = 210.0
+    START = (-735.0, -105.0, 150.0)
+    GOAL = (735.0, 105.0, 150.0)
+    WORLD_MIN = (-2100.0, -525.0, 0.75)
+    WORLD_MAX = (2100.0, 525.0, 225.0)
+    GRID_STEP = 50.0
+    SENSOR_RANGE = 180.0
+    COURSE_HAZARD_COUNT = 12
 
     def __init__(self):
-        self.camera_mode = "orbit"
+        self.camera_mode = "overview"
         self.avoidances = 0
         self.sensor_target = None
         self.avoidance_focus = None
         self.avoidance_cooldowns = {}
         self._planning_mode = False
         super().__init__()
-        self.set_caption("SkyRoute Urban 3D | Sensor-Based UAV Avoidance")
+        self.camera_mode = "overview"
+        self.camera_distance = 4600.0
+        self.camera_elevation = 56.0
+        self.set_caption("SkyRoute Urban 3D | 4.41 km² Downtown Flight Region")
 
     def make_obstacles(self):
-        buildings = [
-            UrbanObstacle("West tower", "box", (-10.2, 8.0, 3.2), (2.25, 2.35, 3.2), (.72,.78,.84)),
-            UrbanObstacle("North apartments", "box", (-4.8, 8.4, 4.4), (2.0, 2.05, 4.4), (.82,.77,.70)),
-            UrbanObstacle("North hotel", "box", (5.7, 8.3, 5.1), (2.15, 2.2, 5.1), (.72,.83,.84)),
-            UrbanObstacle("East tower", "box", (11.0, 7.7, 4.0), (2.2, 2.4, 4.0), (.79,.80,.87)),
-            UrbanObstacle("South offices", "box", (-10.4, -8.2, 4.1), (2.25, 2.3, 4.1), (.82,.83,.85)),
-            UrbanObstacle("South market", "box", (-4.7, -8.4, 2.8), (2.0, 2.0, 2.8), (.87,.78,.68)),
-            UrbanObstacle("Riverfront block", "box", (5.7, -8.1, 3.8), (2.1, 2.25, 3.8), (.71,.79,.83)),
-            UrbanObstacle("South apartments", "box", (11.0, -8.0, 4.7), (2.2, 2.4, 4.7), (.83,.77,.73)),
-            UrbanObstacle("Opposing UAV", "aircraft", (0.8, 0.0, 3.3), .67, (.91,.36,.24),
-                          motion=(1,-1.35,1.35,.62,math.pi/2)),
-            UrbanObstacle("Westbound taxi", "vehicle", (-7.0,-1.35,.64), (.92,.43,.46), (.22,.48,.70),
-                          motion=(0,-11.0,11.0,.20,0.0)),
-            UrbanObstacle("Eastbound van", "vehicle", (7.0,1.35,.64), (1.05,.48,.50), (.82,.53,.25),
-                          motion=(0,-11.0,11.0,.17,math.pi)),
-            UrbanObstacle("Cross-street car", "vehicle", (1.1,-7.0,.64), (.92,.43,.46), (.38,.61,.48),
-                          motion=(1,-8.7,8.7,.20,1.0)),
-            UrbanObstacle("Sidewalk robot", "sphere", (-8.0,3.35,.50), .32, (.93,.63,.25),
-                          motion=(0,-11.0,11.0,.15,2.0)),
+        rng = random.Random(41216)
+        buildings = []
+        facade_palette = [
+            (.72,.76,.80), (.84,.81,.75), (.76,.83,.85),
+            (.83,.78,.72), (.70,.75,.82), (.88,.86,.81),
         ]
+        for row, cy in enumerate(range(-315, 316, 210)):
+            for col, cx in enumerate(range(-1995, 1996, 210)):
+                # Leave a small civic plaza at the launch pad and reserve a low
+                # rooftop heliport at the far end of the route.
+                if (cx, cy) == (-735, -105):
+                    continue
+                if (cx, cy) == (735, 105):
+                    height = 36.0
+                    name = "Rooftop heliport tower"
+                else:
+                    radial = math.hypot(cx, cy)
+                    height = clamp(128.0 - radial*.058 + rng.uniform(-18.0, 24.0), 28.0, 145.0)
+                    name = f"City block {row+1:02d}-{col+1:02d}"
+                hx = rng.uniform(68.0, 78.0)
+                hy = rng.uniform(64.0, 74.0)
+                colour = facade_palette[rng.randrange(len(facade_palette))]
+                buildings.append(UrbanObstacle(name, "box", (cx,cy,height/2),
+                                                (hx,hy,height/2), colour))
+
+        # Cars follow the avenues in both directions. Their low altitude keeps
+        # ground traffic visible without making it a false UAV collision risk.
+        car_palette = [(.17,.42,.64), (.79,.32,.22), (.84,.82,.74),
+                       (.25,.38,.34), (.78,.57,.24), (.31,.34,.40)]
+        avenue_x = list(range(-2100, 2101, 210))
+        avenue_y = list(range(-420, 421, 210))
+        for i in range(22):
+            axis = i % 2
+            lane = -8.0 if (i//2) % 2 == 0 else 8.0
+            speed = rng.uniform(.011, .018)
+            phase = rng.uniform(-math.pi, math.pi)
+            colour = car_palette[i % len(car_palette)]
+            if axis == 0:
+                road_y = avenue_y[(i*3) % len(avenue_y)] + lane
+                motion = (0, -2040.0, 2040.0, speed, phase)
+                home = (0.0, road_y, 1.0)
+            else:
+                road_x = avenue_x[(i*5) % len(avenue_x)] + lane
+                motion = (1, -490.0, 490.0, speed, phase)
+                home = (road_x, 0.0, 1.0)
+            buildings.append(UrbanObstacle(f"City traffic {i+1:02d}", "vehicle", home,
+                                            (4.5,2.0,.85), colour, motion=motion))
+
+        # A twelve-object aerial course crosses the route at timed intervals.
+        # Each object is centered on the flight line at its predicted arrival
+        # time, so the forward sensor has a clear chance to detect it first.
+        takeoff_time = self.START[2] / 9.0
+        cruise_speed = 35.0
+
+        def course_motion(fraction, lateral_range, angular_speed):
+            point=lerp(self.START,self.GOAL,fraction)
+            route_point=(point[0],point[1],self.START[2])
+            encounter_time=takeoff_time+distance(self.START,route_point)/cruise_speed
+            phase=-angular_speed*encounter_time
+            return point,(1,point[1]-lateral_range,point[1]+lateral_range,angular_speed,phase)
+
+        number=0
+        for fraction in (.12,.27,.42,.58,.73,.88):
+            number+=1
+            point,motion=course_motion(fraction,60.0,.08)
+            buildings.append(UrbanObstacle(f"Course hazard {number:02d} · crossing UAV",
+                                            "aircraft",point,1.2,(.91,.34,.22),motion=motion))
+        for fraction in (.19,.50,.81):
+            number+=1
+            point,motion=course_motion(fraction,55.0,.055)
+            buildings.append(UrbanObstacle(f"Course hazard {number:02d} · sensor balloon",
+                                            "sphere",point,4.0,(.95,.67,.18),motion=motion))
+        for fraction in (.34,.66,.94):
+            number+=1
+            point,motion=course_motion(fraction,42.0,.075)
+            buildings.append(UrbanObstacle(f"Course hazard {number:02d} · work platform",
+                                            "box",point,(5.5,3.5,2.5),(.82,.30,.22),motion=motion))
+
+        # Small moving pedestrians add scale cues to the sidewalks.
+        for i in range(14):
+            axis = i % 2
+            lane = 29.0 if i % 3 else -29.0
+            if axis == 0:
+                road_y = avenue_y[(i*2) % len(avenue_y)]
+                home = (0.0, road_y+lane, .85)
+                motion = (0, -2040.0, 2040.0, .006, i*.9)
+            else:
+                road_x = avenue_x[(i*3) % len(avenue_x)]
+                home = (road_x+lane, 0.0, .85)
+                motion = (1, -490.0, 490.0, .006, i*.9)
+            buildings.append(UrbanObstacle(f"Pedestrian {i+1:02d}", "sphere", home,
+                                            1.05, (.84,.56,.30), motion=motion))
         return buildings
+
+    def segment_clear(self, a, b, clearance=8.0):
+        steps = max(2, int(math.ceil(distance(a,b)/8.0)))
+        return all(not self.collides(lerp(a,b,i/steps),clearance)
+                   for i in range(1,steps))
 
     def make_labels(self):
         super().make_labels()
         l=self.labels
-        l["button_contact"].text="RUN SENSOR AVOIDANCE"
+        l["button_contact"].text="START SENSOR MISSION"
         l["button_contact"].font_size=9
-        l["mission"].text="START  →  SAFE LANDING"
-        l["mission_sub"].text="Live downtown traffic course"
+        l["button_auto"].text="START SAFE MISSION"
+        l["mission"].text="START PLAZA  →  ROOFTOP PAD"
+        l["mission_sub"].text="1.5 km route · 12 hazards · rooftop landing"
         l["contact_head"].text="SENSOR AVOIDANCES"
-        l["world_title"].text="DOWNTOWN FLIGHT CORRIDOR"
-        l["world_sub"].text="Moving traffic  ·  forward range sensors  ·  predictive rerouting"
-        l["controls"].text="C sensor demo  A safe route  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  ·  right-drag to orbit"
+        l["world_title"].text="CENTRAL PARK-SCALE DOWNTOWN"
+        l["world_sub"].text="4.2 km long  ·  4.41 km²  ·  80 blocks  ·  12 course hazards"
+        l["controls"].text="C sensor mission  A safe route  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view"
         l["impact_tag"].color=(177,104,29,255)
-        l["camera"]=pyglet.text.Label("CAMERA  1 ORBIT  ·  2 CHASE  ·  3 PILOT  ·  4 TOP",
+        l["camera"]=pyglet.text.Label("CAMERA  1 ORBIT  ·  2 CHASE  ·  3 PILOT  ·  4 TOP  ·  5 CITY",
             x=0,y=0,font_name="Arial",font_size=8,weight="bold",color=(81,101,124,255))
-        l["sensor_value"]=pyglet.text.Label("RANGE 7.4m",x=186,y=49,font_name="Arial",font_size=8,weight="bold",color=(81,101,124,255))
+        l["sensor_value"]=pyglet.text.Label("RANGE 180m",x=186,y=49,font_name="Arial",font_size=8,weight="bold",color=(81,101,124,255))
 
     def reset(self):
         super().reset()
@@ -575,6 +665,12 @@ class SkyRouteCity(SkyRoute3D):
         self.sensor_target=None
         self.avoidance_focus=None
         self.avoidance_cooldowns.clear()
+        self.camera_mode="overview"
+        self.camera_distance=4600.0
+        self.camera_elevation=56.0
+
+    def camera_focus(self):
+        return (0.0,0.0,0.0) if self.camera_mode=="overview" else self.drone
 
     def run_contact_demo(self):
         self.reset()
@@ -777,24 +873,33 @@ class SkyRouteCity(SkyRoute3D):
         near=.1
         top=near*math.tan(math.radians(50)/2)
         aspect=vw/max(1.0,float(self.height))
-        glFrustum(-top*aspect,top*aspect,-top,top,near,150.0)
+        glFrustum(-top*aspect,top*aspect,-top,top,near,8500.0)
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         forward=(math.cos(math.radians(self.heading)),math.sin(math.radians(self.heading)),0.0)
         if self.camera_mode=="chase":
-            target=add(self.drone,(forward[0]*2.8,forward[1]*2.8,.75))
-            eye=add(sub(self.drone,mul(forward,7.5)),(0,0,4.0))
+            target=add(self.drone,(forward[0]*5.0,forward[1]*5.0,-1.0))
+            eye=add(sub(self.drone,mul(forward,22.0)),(0,0,8.0))
             up_ref=(0,0,1)
         elif self.camera_mode=="pilot":
-            eye=add(self.drone,(forward[0]*.48,forward[1]*.48,.10))
-            target=add(self.drone,(forward[0]*15.0,forward[1]*15.0,-.20))
+            eye=add(self.drone,(forward[0]*1.4,forward[1]*1.4,.15))
+            target=add(self.drone,(forward[0]*150.0,forward[1]*150.0,-.35))
             up_ref=(0,0,1)
         elif self.camera_mode=="top":
             target=(self.drone[0],self.drone[1],0.0)
-            eye=(self.drone[0],self.drone[1],max(18.0,self.camera_distance*.85))
+            eye=(self.drone[0],self.drone[1],max(80.0,self.camera_distance*.85))
             up_ref=(0,1,0)
+        elif self.camera_mode=="overview":
+            target=(0.0,0.0,28.0)
+            yaw=math.radians(self.camera_yaw)
+            elev=math.radians(self.camera_elevation)
+            horizontal=self.camera_distance*math.cos(elev)
+            eye=(target[0]+math.sin(yaw)*horizontal,
+                 target[1]-math.cos(yaw)*horizontal,
+                 target[2]+self.camera_distance*math.sin(elev))
+            up_ref=(0,0,1)
         else:
-            target=(0.0,0.0,2.3)
+            target=(self.drone[0],self.drone[1],self.drone[2]-12.0)
             yaw=math.radians(self.camera_yaw)
             elev=math.radians(self.camera_elevation)
             horizontal=self.camera_distance*math.cos(elev)
@@ -830,92 +935,164 @@ class SkyRouteCity(SkyRoute3D):
 
     def draw_floor(self):
         glDisable(GL_DEPTH_TEST)
-        glColor4f(.94,.955,.972,1.0)
+        glColor4f(.93,.945,.96,1.0)
         glBegin(GL_QUADS)
-        for v in ((-16,-14,-.05),(16,-14,-.05),(16,14,-.05),(-16,14,-.05)):
+        for v in ((-2120,-545,-.05),(2120,-545,-.05),(2120,545,-.05),(-2120,545,-.05)):
             glVertex3f(*v)
         glEnd()
         glEnable(GL_DEPTH_TEST)
-        # Avenues and sidewalks create a recognisable downtown street grid.
-        self.flat_quad(-15.5,-2.65,15.5,2.65,.005,(.31,.35,.40))
-        self.flat_quad(-1.45,-13,3.65,13,.012,(.34,.38,.42))
-        self.flat_quad(-15.5,-3.45,15.5,-2.65,.025,(.76,.79,.82))
-        self.flat_quad(-15.5,2.65,15.5,3.45,.025,(.76,.79,.82))
-        self.flat_quad(-2.25,-13,-1.45,13,.028,(.75,.79,.82))
-        self.flat_quad(3.65,-13,4.45,13,.028,(.75,.79,.82))
-        # Kerb edges.
-        for y in (-2.68,2.62):
-            draw_line((-15.5,y,.06),(15.5,y,.06),(.91,.92,.92),1.4,.9)
-        for x in (-1.48,3.62):
-            draw_line((x,-13,.06),(x,13,.06),(.91,.92,.92),1.4,.9)
-        # Painted yellow centerlines and white lane dashes.
-        glLineWidth(2.0)
-        glColor4f(.95,.79,.32,.95)
+        road_x=range(-2100,2101,210)
+        road_y=range(-420,421,210)
+        # Asphalt and raised sidewalk bands are batched for a smooth overview.
+        glColor4f(.25,.285,.33,1.0)
+        glBegin(GL_QUADS)
+        for x in road_x:
+            for v in ((x-18,-525,.005),(x+18,-525,.005),(x+18,525,.005),(x-18,525,.005)):
+                glVertex3f(*v)
+        for y in road_y:
+            for v in ((-2100,y-18,.006),(2100,y-18,.006),(2100,y+18,.006),(-2100,y+18,.006)):
+                glVertex3f(*v)
+        glEnd()
+        glColor4f(.70,.73,.76,1.0)
+        glBegin(GL_QUADS)
+        for x in road_x:
+            for side in (-1,1):
+                xa=x+side*22
+                glVertex3f(xa-4,-525,.02); glVertex3f(xa+4,-525,.02)
+                glVertex3f(xa+4,525,.02); glVertex3f(xa-4,525,.02)
+        for y in road_y:
+            for side in (-1,1):
+                ya=y+side*22
+                glVertex3f(-2100,ya-4,.021); glVertex3f(2100,ya-4,.021)
+                glVertex3f(2100,ya+4,.021); glVertex3f(-2100,ya+4,.021)
+        glEnd()
+        # Kerbs, lane guides and dashed centre lines.
+        glLineWidth(1.6)
+        glColor4f(.88,.88,.84,.95)
         glBegin(GL_LINES)
-        for x in range(-15,16,2):
-            glVertex3f(x,0,.055)
-            glVertex3f(min(15,x+1.05),0,.055)
+        for x in road_x:
+            for side in (-1,1):
+                xx=x+side*18
+                glVertex3f(xx,-525,.055); glVertex3f(xx,525,.055)
+        for y in road_y:
+            for side in (-1,1):
+                yy=y+side*18
+                glVertex3f(-2100,yy,.056); glVertex3f(2100,yy,.056)
+        glEnd()
+        glLineWidth(2.0)
+        glColor4f(.94,.73,.27,.95)
+        glBegin(GL_LINES)
+        for x in road_x:
+            for y in range(-495,496,42):
+                glVertex3f(x,y,.065); glVertex3f(x,min(525,y+12),.065)
+        for y in road_y:
+            for x in range(-2070,2071,42):
+                glVertex3f(x,y,.066); glVertex3f(min(2100,x+12),y,.066)
         glEnd()
         glLineWidth(1.3)
-        glColor4f(.93,.95,.96,.82)
+        glColor4f(.91,.93,.94,.88)
         glBegin(GL_LINES)
-        for y in (-1.35,1.35):
-            for x in range(-15,16,3):
-                glVertex3f(x,y,.056)
-                glVertex3f(min(15,x+1.45),y,.056)
-        for y in range(-12,13,3):
-            glVertex3f(1.1,y,.058)
-            glVertex3f(1.1,min(13,y+1.4),.058)
+        for x in road_x:
+            for lane in (-8,8):
+                for y in range(-495,496,48):
+                    glVertex3f(x+lane,y,.067); glVertex3f(x+lane,min(525,y+10),.067)
+        for y in road_y:
+            for lane in (-8,8):
+                for x in range(-2070,2071,48):
+                    glVertex3f(x,y+lane,.068); glVertex3f(min(2100,x+10),y+lane,.068)
         glEnd()
-        # Crosswalks at the main intersection.
-        glColor4f(.91,.93,.94,.92)
+        # Large zebra crossings at the central junctions.
+        glColor4f(.91,.93,.94,.94)
         glBegin(GL_QUADS)
-        for i in range(7):
-            x=-2.9+i*.63
-            glVertex3f(x,-2.35,.06); glVertex3f(x+.32,-2.35,.06)
-            glVertex3f(x+.32,-1.70,.06); glVertex3f(x,-1.70,.06)
-            glVertex3f(x,1.70,.06); glVertex3f(x+.32,1.70,.06)
-            glVertex3f(x+.32,2.35,.06); glVertex3f(x,2.35,.06)
-        glEnd()
-        # Faint paving joints.
-        glColor4f(.68,.73,.78,.38)
-        glBegin(GL_LINES)
-        for x in range(-15,16,2):
-            for y in (-3.35,3.35):
-                glVertex3f(x,y,.031); glVertex3f(x+1.5,y,.031)
-        for y in range(-12,13,2):
-            for x in (-2.15,4.35):
-                glVertex3f(x,y,.032); glVertex3f(x,y+1.5,.032)
+        for x in (-1260,0,1260):
+            for y in (-210,0,210):
+                for stripe in range(-3,4):
+                    offset=stripe*5.0
+                    for side in (-1,1):
+                        yy=y+side*24
+                        glVertex3f(x-17,yy+offset-1,.075); glVertex3f(x+17,yy+offset-1,.075)
+                        glVertex3f(x+17,yy+offset+1,.075); glVertex3f(x-17,yy+offset+1,.075)
+                        xx=x+side*24
+                        glVertex3f(xx+offset-1,y-17,.076); glVertex3f(xx+offset+1,y-17,.076)
+                        glVertex3f(xx+offset+1,y+17,.076); glVertex3f(xx+offset-1,y+17,.076)
         glEnd()
 
-    def draw_building_windows(self,obstacle):
+    def draw_building_windows(self, obstacle, distance_from_camera):
         cx,cy,cz=obstacle.center
         hx,hy,hz=obstacle.size
-        floors=max(2,int((2*hz)/.78))
-        columns=max(3,int((2*hx)/.72))
-        glColor4f(.39,.61,.72,.86)
+        if distance_from_camera < 260.0:
+            spacing=8.5
+        elif distance_from_camera < 850.0:
+            spacing=17.0
+        else:
+            spacing=31.0
+        floors=max(2,min(18,int((2*hz)/spacing)))
+        columns=max(3,min(18,int((2*hx)/spacing)))
+        row_step=(2*hz)/(floors+1)
+        col_step=(2*hx)/(columns+1)
+        frame_w=min(3.3,col_step*.55)
+        frame_h=min(4.4,row_step*.60)
+        seed=sum(ord(c) for c in obstacle.name)
         glBegin(GL_QUADS)
         for floor in range(floors):
-            z=cz-hz+.42+floor*.76
-            if z>cz+hz-.20:
-                continue
+            z=cz-hz+(floor+1)*row_step
             for col in range(columns):
-                wx=cx-hx+.35+col*((2*hx-.7)/max(1,columns-1))
-                ww=.25
-                wh=.27
-                # Street-facing front and rear façades.
-                for y in (cy-hy-.012,cy+hy+.012):
-                    glVertex3f(wx-ww,y,z-wh); glVertex3f(wx+ww,y,z-wh)
-                    glVertex3f(wx+ww,y,z+wh); glVertex3f(wx-ww,y,z+wh)
-                # Side façades.
-                wy=cy-hy+.38+col*((2*hy-.76)/max(1,columns-1))
-                for x in (cx-hx-.012,cx+hx+.012):
-                    glVertex3f(x,wy-.20,z-wh); glVertex3f(x,wy+.20,z-wh)
-                    glVertex3f(x,wy+.20,z+wh); glVertex3f(x,wy-.20,z+wh)
+                wx=cx-hx+(col+1)*col_step
+                wy=cy-hy+(col+1)*((2*hy)/(columns+1))
+                tint=(.29,.48,.60) if (floor+col+seed)%7 else (.68,.63,.48)
+                # Dark frames, reflective glass, and a narrow highlight on
+                # each window give the facades more depth than flat grids.
+                for side in (-1,1):
+                    y=cy+side*(hy+.035)
+                    glColor4f(.16,.21,.27,1.0)
+                    glVertex3f(wx-frame_w/2,y,z-frame_h/2)
+                    glVertex3f(wx+frame_w/2,y,z-frame_h/2)
+                    glVertex3f(wx+frame_w/2,y,z+frame_h/2)
+                    glVertex3f(wx-frame_w/2,y,z+frame_h/2)
+                    y_glass=cy+side*(hy+.055)
+                    glColor4f(tint[0],tint[1],tint[2],1.0)
+                    glVertex3f(wx-frame_w*.39,y_glass,z-frame_h*.39)
+                    glVertex3f(wx+frame_w*.39,y_glass,z-frame_h*.39)
+                    glVertex3f(wx+frame_w*.39,y_glass,z+frame_h*.39)
+                    glVertex3f(wx-frame_w*.39,y_glass,z+frame_h*.39)
+                    glColor4f(.72,.82,.86,.78)
+                    glVertex3f(wx-frame_w*.30,y_glass+side*.012,z+frame_h*.22)
+                    glVertex3f(wx-frame_w*.05,y_glass+side*.012,z+frame_h*.22)
+                    glVertex3f(wx-frame_w*.05,y_glass+side*.012,z+frame_h*.30)
+                    glVertex3f(wx-frame_w*.30,y_glass+side*.012,z+frame_h*.30)
+
+                    x=cx+side*(hx+.035)
+                    glColor4f(.16,.21,.27,1.0)
+                    glVertex3f(x,wy-frame_w/2,z-frame_h/2)
+                    glVertex3f(x,wy+frame_w/2,z-frame_h/2)
+                    glVertex3f(x,wy+frame_w/2,z+frame_h/2)
+                    glVertex3f(x,wy-frame_w/2,z+frame_h/2)
+                    x_glass=cx+side*(hx+.055)
+                    glColor4f(tint[0],tint[1],tint[2],1.0)
+                    glVertex3f(x_glass,wy-frame_w*.39,z-frame_h*.39)
+                    glVertex3f(x_glass,wy+frame_w*.39,z-frame_h*.39)
+                    glVertex3f(x_glass,wy+frame_w*.39,z+frame_h*.39)
+                    glVertex3f(x_glass,wy-frame_w*.39,z+frame_h*.39)
         glEnd()
-        # A simple lit crown gives taller buildings a skyline silhouette.
-        if hz>3.5:
-            draw_box((cx,cy,cz+hz+.08),(hx*.96,hy*.96,.08),(.68,.73,.80))
+
+    def draw_rooftop_detail(self, obstacle, distance_from_camera):
+        cx,cy,cz=obstacle.center
+        hx,hy,hz=obstacle.size
+        roof=cz+hz
+        if distance_from_camera>900.0:
+            return
+        # Low parapet strips leave a clear landing surface in the heliport block.
+        rail_h=.65
+        draw_box((cx,cy-hy+1.0,roof+rail_h),(hx,1.0,rail_h),(.58,.64,.70))
+        draw_box((cx,cy+hy-1.0,roof+rail_h),(hx,1.0,rail_h),(.58,.64,.70))
+        draw_box((cx-hx+1.0,cy,roof+rail_h),(1.0,hy,rail_h),(.58,.64,.70))
+        draw_box((cx+hx-1.0,cy,roof+rail_h),(1.0,hy,rail_h),(.58,.64,.70))
+        if obstacle.name=="Rooftop heliport tower":
+            draw_box((cx-34,cy+34,roof+5.0),(11,10,4.5),(.47,.54,.61))
+        elif distance_from_camera<450.0:
+            unit_x=min(14.0,hx*.22); unit_y=min(12.0,hy*.22)
+            draw_box((cx-hx*.34,cy-hy*.31,roof+3.0),(unit_x,unit_y,2.6),(.54,.59,.64))
+            draw_box((cx+hx*.30,cy+hy*.27,roof+2.2),(unit_x*.72,unit_y*.8,1.8),(.59,.63,.67))
 
     def draw_vehicle(self,obstacle):
         cx,cy,cz=obstacle.center
@@ -936,61 +1113,129 @@ class SkyRouteCity(SkyRoute3D):
 
     def draw_aircraft_obstacle(self,obstacle):
         cx,cy,cz=obstacle.center
+        arm=obstacle.size*.82
         glPushMatrix()
         glTranslatef(cx,cy,cz+.06*math.sin(self.time*4.0))
         glRotatef(obstacle.heading,0,0,1)
-        arms=((.55,.55,0),(.55,-.55,0),(-.55,.55,0),(-.55,-.55,0))
+        arms=((arm,arm,0),(arm,-arm,0),(-arm,arm,0),(-arm,-arm,0))
         for p in arms:
-            draw_tube((0,0,0),p,.045,(.28,.32,.37))
-        draw_box((0,0,0),(.25,.20,.10),obstacle.colour)
+            draw_tube((0,0,0),p,.065,(.28,.32,.37))
+        draw_box((0,0,0),(.34,.27,.13),obstacle.colour)
         for px,py,_ in arms:
-            draw_sphere((px,py,.04),.09,(.18,.23,.29),10,6)
+            draw_sphere((px,py,.05),.12,(.18,.23,.29),12,7)
             glPushMatrix()
             glTranslatef(px,py,.08)
             glRotatef(self.time*850+px*200+py*140,0,0,1)
-            draw_box((0,0,0),(.31,.025,.012),(.20,.25,.31))
+            draw_box((0,0,0),(.43,.032,.014),(.20,.25,.31))
             glPopMatrix()
         glPopMatrix()
 
     def draw_street_furniture(self):
-        # Street trees on the pavements.
-        for x in (-13,-9,-5,7,11,14):
-            for side in (-1,1):
-                y=side*3.12
-                draw_tube((x,y,.08),(x,y,1.55),.075,(.42,.34,.25))
-                draw_sphere((x,y,2.02),.72,(.51,.65,.49),14,8)
-                draw_sphere((x+.28,y-.08,2.22),.43,(.57,.70,.55),12,7)
-        # Modern street lamps and curved-looking arms.
-        for x in (-12,-7,-2,5,10,14):
-            for side in (-1,1):
-                y=side*3.18
-                draw_tube((x,y,.06),(x,y,3.25),.045,(.34,.40,.46))
-                draw_tube((x,y,3.25),(x+.45,y,3.45),.04,(.34,.40,.46))
-                draw_box((x+.50,y,3.44),(.26,.10,.055),(.96,.91,.68))
+        focus=self.camera_focus()
+        visibility=350.0+min(self.camera_distance*.25,700.0)
+        # Trees mark neighborhood streets and break up the hard roof grid.
+        for x in range(-1890,1891,420):
+            for y in range(-315,316,210):
+                for side in (-1,1):
+                    tx=x+side*25.0
+                    if math.hypot(tx-focus[0],y-focus[1])>visibility:
+                        continue
+                    draw_tube((tx,y,.10),(tx,y,8.0),.42,(.36,.29,.22))
+                    draw_sphere((tx,y,10.4),3.5,(.35,.53,.40),14,8)
+                    draw_sphere((tx+1.1,y-.5,11.7),2.2,(.43,.61,.47),12,7)
+        # Tall modern streetlights at regular intervals along the avenues.
+        for x in range(-1890,1891,420):
+            for y in range(-315,316,210):
+                if math.hypot(x-focus[0],y-focus[1])>visibility:
+                    continue
+                draw_tube((x+27,y,.10),(x+27,y,9.0),.28,(.28,.34,.40))
+                draw_tube((x+27,y,9.0),(x+32,y,10.0),.23,(.28,.34,.40))
+                draw_box((x+34,y,10.0),(2.0,.65,.18),(.96,.84,.57))
 
     def draw_environment(self):
+        focus=self.camera_focus()
+        visibility=550.0+self.camera_distance*1.55
         for obstacle in self.obstacles:
+            cx,cy,cz=obstacle.center
+            d=math.hypot(cx-focus[0],cy-focus[1])
+            if d>visibility:
+                continue
             if obstacle.kind=="box":
-                cx,cy,cz=obstacle.center
                 hx,hy,hz=obstacle.size
-                draw_circle_xy((cx,cy,.04),max(hx,hy)*.86,(.39,.46,.53),1.0,.14)
-                draw_box(obstacle.center,obstacle.size,obstacle.colour)
-                self.draw_building_windows(obstacle)
+                is_building=obstacle.name.startswith("City block") or obstacle.name=="Rooftop heliport tower"
+                if is_building:
+                    if d<450.0:
+                        draw_circle_xy((cx,cy,.06),max(hx,hy)*.92,(.30,.37,.44),1.5,.19)
+                    draw_box(obstacle.center,obstacle.size,obstacle.colour)
+                    self.draw_building_windows(obstacle,d)
+                    self.draw_rooftop_detail(obstacle,d)
+                else:
+                    draw_box(obstacle.center,obstacle.size,obstacle.colour)
+                    # High-contrast warning panels identify the suspended
+                    # construction platforms as course hazards.
+                    for side,colour in ((-1,(.16,.20,.24)),(1,(.98,.62,.13))):
+                        draw_box((cx+side*hx*.55,cy-hy-.05,cz),(.42,.08,hz*.80),colour)
+                    for side in (-1,1):
+                        draw_sphere((cx+side*hx*.70,cy,cz+hz+.45),.58,(.98,.68,.17),10,6)
+                    if obstacle is self.sensor_target:
+                        draw_circle_xy((cx,cy,cz-hz-1.2),max(hx,hy)+4.0,(.98,.49,.17),2.0,.8)
             elif obstacle.kind=="vehicle":
-                self.draw_vehicle(obstacle)
+                if d<1050.0:
+                    self.draw_vehicle(obstacle)
+                else:
+                    draw_box(obstacle.center,obstacle.size,obstacle.colour)
             elif obstacle.kind=="aircraft":
-                draw_circle_xy((obstacle.center[0],obstacle.center[1],obstacle.center[2]-.7),obstacle.size+1.0,
+                draw_circle_xy((obstacle.center[0],obstacle.center[1],obstacle.center[2]-1.5),obstacle.size+3.0,
                                (.93,.48,.23) if obstacle is self.sensor_target else (.34,.68,.78),1.5,.60)
                 self.draw_aircraft_obstacle(obstacle)
             else:
+                if obstacle.name.startswith("Course hazard"):
+                    radius=obstacle.size+3.5
+                    draw_circle_xy((cx,cy,cz-obstacle.size-.15),radius,
+                                   (.98,.49,.17) if obstacle is self.sensor_target else (.90,.66,.22),
+                                   1.6,.55)
                 draw_sphere(obstacle.center,obstacle.size,obstacle.colour,14,8)
         self.draw_street_furniture()
-        # Traffic signal assembly at the centre of the cross-street.
-        draw_tube((-2.75,3.12,.08),(-2.75,3.12,3.05),.065,(.30,.36,.42))
-        draw_tube((-2.75,3.12,3.0),(-1.55,3.12,3.0),.05,(.30,.36,.42))
-        draw_box((-1.50,3.12,2.82),(.18,.18,.48),(.20,.24,.29))
-        draw_sphere((-1.50,3.12,3.12),.085,(.91,.30,.24),10,6)
-        draw_sphere((-1.50,3.12,2.53),.085,(.22,.68,.43),10,6)
+        # Signal gantries at the principal downtown junctions.
+        for ix in (-1260.0,0.0,1260.0):
+            for iy in (-210.0,0.0,210.0):
+                if math.hypot(ix-focus[0],iy-focus[1])>visibility:
+                    continue
+                pole_x=ix+23.0
+                pole_y=iy+23.0
+                draw_tube((pole_x,pole_y,.1),(pole_x,pole_y,11.0),.35,(.27,.33,.39))
+                draw_tube((pole_x,pole_y,10.0),(pole_x-14.0,pole_y,10.0),.28,(.27,.33,.39))
+                draw_box((pole_x-15.0,pole_y,9.0),(.9,.8,2.4),(.16,.20,.25))
+                for offset,colour in ((10.0,(.88,.22,.18)),(9.0,(.91,.69,.18)),(8.0,(.19,.67,.39))):
+                    draw_sphere((pole_x-15.0,pole_y-.86,offset),.36,colour,10,6)
+
+    def draw_world_route(self):
+        if len(self.route)<2:
+            return
+        glLineWidth(3.2 if self.mode!="direct" else 4.0)
+        if self.mode=="direct":
+            glColor4f(.96,.51,.17,.94)
+            glBegin(GL_LINES)
+            for a,b in zip(self.route,self.route[1:]):
+                span=distance(a,b)
+                dash=26.0
+                period=52.0
+                for start in range(0,int(span),int(period)):
+                    p0=lerp(a,b,min(1.0,start/max(span,1e-6)))
+                    p1=lerp(a,b,min(1.0,(start+dash)/max(span,1e-6)))
+                    glVertex3f(p0[0],p0[1],p0[2]+2.0)
+                    glVertex3f(p1[0],p1[1],p1[2]+2.0)
+            glEnd()
+        else:
+            glColor4f(.08,.63,.70,.94)
+            glBegin(GL_LINES)
+            for a,b in zip(self.route,self.route[1:]):
+                glVertex3f(a[0],a[1],a[2]+2.0)
+                glVertex3f(b[0],b[1],b[2]+2.0)
+            glEnd()
+            for p in self.route[1:-1]:
+                draw_sphere((p[0],p[1],p[2]+2.0),2.2,(.08,.63,.70),10,6)
+        glLineWidth(1.0)
 
     def draw_sensor_rays(self):
         if self.mode not in ("direct","follow","replan"):
@@ -1061,10 +1306,11 @@ class SkyRouteCity(SkyRoute3D):
             l["impact_tag"].text=f"{self.avoidances} SENSOR AVOIDANCE EVENT(S)"
         else:
             l["impact_tag"].text=""
-        view_names={"orbit":"1 ORBIT","chase":"2 CHASE","pilot":"3 PILOT","top":"4 TOP"}
+        view_names={"orbit":"1 ORBIT","chase":"2 CHASE","pilot":"3 PILOT",
+                    "top":"4 TOP","overview":"5 CITY OVERVIEW"}
         l["camera"].x=max(self.SIDEBAR+430,self.width-470)
         l["camera"].y=h-31
-        l["camera"].text="CAMERA  "+view_names[self.camera_mode]+"   ·   1–4 TO SWITCH"
+        l["camera"].text="CAMERA  "+view_names[self.camera_mode]+"   ·   1–5 TO SWITCH"
         for label in l.values():
             label.draw()
         glEnable(GL_DEPTH_TEST)
@@ -1090,15 +1336,25 @@ class SkyRouteCity(SkyRoute3D):
         if buttons & mouse.RIGHT:
             if self.camera_mode!="orbit":
                 self.camera_mode="orbit"
+                if self.camera_distance>1000.0:
+                    self.camera_distance=200.0
+                    self.camera_elevation=32.0
             self.camera_yaw+=dx*.34
             self.camera_elevation=clamp(self.camera_elevation+dy*.24,12,72)
 
     def on_mouse_scroll(self,x,y,scroll_x,scroll_y):
-        self.camera_distance=clamp(self.camera_distance-scroll_y*1.7,17.0,48.0)
+        self.camera_distance=clamp(self.camera_distance*(.88**scroll_y),80.0,6000.0)
 
     def cycle_camera(self):
-        modes=("orbit","chase","pilot","top")
+        modes=("orbit","chase","pilot","top","overview")
+        previous=self.camera_mode
         self.camera_mode=modes[(modes.index(self.camera_mode)+1)%len(modes)]
+        if self.camera_mode=="overview":
+            self.camera_distance=4600.0
+            self.camera_elevation=56.0
+        elif previous=="overview":
+            self.camera_distance=200.0
+            self.camera_elevation=32.0
         self.set_status("CAMERA VIEW · "+self.camera_mode.upper(),1.6)
 
     def on_key_press(self,symbol,modifiers):
@@ -1112,21 +1368,237 @@ class SkyRouteCity(SkyRoute3D):
             self.paused=not self.paused
             self.set_status("SIMULATION PAUSED" if self.paused else "SIMULATION RESUMED",1.8)
         elif symbol==key._1:
+            if self.camera_distance>1000.0: self.camera_distance=200.0
+            self.camera_elevation=32.0
             self.camera_mode="orbit"; self.set_status("CAMERA VIEW · ORBIT",1.5)
         elif symbol==key._2:
+            if self.camera_distance>1000.0: self.camera_distance=220.0
             self.camera_mode="chase"; self.set_status("CAMERA VIEW · CHASE",1.5)
         elif symbol==key._3:
+            if self.camera_distance>1000.0: self.camera_distance=220.0
             self.camera_mode="pilot"; self.set_status("CAMERA VIEW · PILOT",1.5)
         elif symbol==key._4:
+            if self.camera_distance>1000.0: self.camera_distance=500.0
             self.camera_mode="top"; self.set_status("CAMERA VIEW · TOP-DOWN",1.5)
+        elif symbol==key._5:
+            self.camera_mode="overview"; self.camera_distance=4600.0
+            self.camera_elevation=56.0
+            self.set_status("CAMERA VIEW · FULL CITY OVERVIEW",1.8)
         elif symbol==key.ESCAPE:
             self.close()
 
 
 
+
+class SkyRouteMission(SkyRouteCity):
+    """Adds a complete takeoff, cruise, and landing sequence."""
+    START_PAD = (-735.0, -105.0, .44)
+    LANDING_PAD = (735.0, 105.0, 36.45)
+    TAKEOFF_SPEED = 9.0
+    CRUISE_SPEED = 35.0
+    LANDING_SPEED = 8.0
+
+    def __init__(self):
+        super().__init__()
+        self.mission_type="sensor"
+        self.reset()
+        self.set_caption("SkyRoute Urban 3D | Central Park-Scale City · UAV Mission")
+
+    def make_labels(self):
+        super().make_labels()
+        self.labels["button_contact"].text="START SENSOR MISSION"
+        self.labels["button_auto"].text="START SAFE MISSION"
+        self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
+        self.labels["mission_sub"].text="1.5 km route · takeoff · touchdown"
+        self.labels["world_sub"].text="4.2 km long · 4.41 km² downtown · dynamic traffic · sensor rerouting · rooftop landing"
+        self.labels["controls"].text="C sensor mission  A safe mission  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
+
+    def reset(self):
+        super().reset()
+        self.time=0.0
+        self.drone=self.START_PAD
+        self.heading=0.0
+        self.velocity=0.0
+        self.mode="idle"
+        self.route=[]
+        self.route_index=0
+        self.direct_target=None
+        self.mission_type="sensor"
+        self.sensor_reading=self.SENSOR_RANGE
+        self.sensor_target=None
+        self.avoidances=0
+        self.animate_city()
+        self.camera_mode="overview"
+        self.camera_distance=4600.0
+        self.set_status("READY · ON LAUNCH PAD",2.5)
+
+    def run_contact_demo(self):
+        self.reset()
+        self.mission_type="sensor"
+        self.camera_mode="chase"
+        self.camera_distance=220.0
+        self.mode="takeoff"
+        self.set_status("MOTOR START · TAKING OFF",2.2)
+
+    def run_safe_route(self):
+        self.reset()
+        self.mission_type="safe"
+        self.camera_mode="chase"
+        self.camera_distance=220.0
+        self.mode="takeoff"
+        self.set_status("MOTOR START · TAKING OFF",2.2)
+
+    def begin_landing(self):
+        self.drone=(self.GOAL[0],self.GOAL[1],max(self.GOAL[2],self.drone[2]))
+        self.mode="landing"
+        self.direct_target=self.LANDING_PAD
+        self.route=[self.drone,self.LANDING_PAD]
+        self.route_index=1
+        self.heading=180.0
+        self.set_status("LANDING APPROACH · DESCENDING TO PAD",3.2)
+
+    def finish_landing(self):
+        self.drone=self.LANDING_PAD
+        self.velocity=0.0
+        self.mode="complete"
+        self.route=[self.GOAL,self.LANDING_PAD]
+        self.route_index=len(self.route)
+        self.set_status("LANDED · MOTORS IDLE",5.0)
+
+    def move_drone(self,target,speed,dt):
+        previous=self.drone
+        remaining=distance(previous,target)
+        if remaining<=.045:
+            self.drone=target
+            self.velocity=0.0
+            return True
+        move=min(remaining,speed*dt)
+        candidate=add(previous,mul(unit(sub(target,previous)),move))
+        obstacle=self.collides(candidate,self.DRONE_RADIUS)
+        if obstacle:
+            if self.mode in ("direct","follow"):
+                self.begin_sensor_avoidance(obstacle,True)
+            else:
+                # Stop on the safe side and hold for a clear landing area.
+                self.velocity=0.0
+                self.set_status("LANDING ZONE BLOCKED · HOLDING",2.0)
+            return False
+        self.drone=candidate
+        self.velocity=move/max(dt,1e-5)
+        horizontal=sub(target,previous)
+        if abs(horizontal[0])+abs(horizontal[1])>.001:
+            self.heading=math.degrees(math.atan2(horizontal[1],horizontal[0]))
+        return distance(self.drone,target)<=.045
+
+    def update(self,dt):
+        dt=min(dt,.05)
+        if self.paused:
+            if self.status_timer>0:
+                self.status_timer=max(0.0,self.status_timer-dt)
+            self.velocity=0.0
+            return
+        self.time+=dt
+        self.animate_city()
+        if self.status_timer>0:
+            self.status_timer-=dt
+        if self.contact_flash>0:
+            self.contact_flash=max(0.0,self.contact_flash-dt)
+
+        if self.mode=="takeoff":
+            if self.move_drone(self.START,self.TAKEOFF_SPEED,dt):
+                if self.mission_type=="sensor":
+                    self.direct_target=self.GOAL
+                    self.route=[self.START,self.GOAL]
+                    self.mode="direct"
+                    self.set_status("AIRBORNE · RANGE SENSORS ACTIVE",2.3)
+                else:
+                    path=self.plan_path(self.START,self.GOAL)
+                    if path:
+                        self.route=path
+                        self.route_index=1 if len(path)>1 else 0
+                        self.mode="follow"
+                        self.set_status("AIRBORNE · SAFE ROUTE ACTIVE",2.3)
+                    else:
+                        self.mode="idle"
+                        self.drone=self.START_PAD
+                        self.set_status("NO SAFE ROUTE · RETURNED TO PAD",3.0)
+            return
+
+        if self.mode in ("direct","follow"):
+            obstacle=self.detect_sensor_hazard()
+            if obstacle and self.avoidance_cooldowns.get(obstacle,0.0)<=self.time:
+                self.begin_sensor_avoidance(obstacle)
+                return
+
+        if self.mode=="direct" and self.direct_target:
+            if distance(self.drone,self.direct_target)<=.05:
+                self.drone=self.direct_target
+                self.begin_landing()
+                return
+            self.move_drone(self.direct_target,self.CRUISE_SPEED,dt)
+        elif self.mode=="follow" and self.route:
+            while self.route_index<len(self.route) and distance(self.drone,self.route[self.route_index])<.12:
+                self.route_index+=1
+            if self.route_index>=len(self.route):
+                self.begin_landing()
+                return
+            self.move_drone(self.route[self.route_index],self.CRUISE_SPEED,dt)
+        elif self.mode=="landing":
+            if self.move_drone(self.LANDING_PAD,self.LANDING_SPEED,dt):
+                self.finish_landing()
+                return
+        else:
+            self.velocity=0.0
+
+        if self.sensor_target and distance(self.drone,self.sensor_target.center)>self.SENSOR_RANGE+2.0:
+            self.sensor_target=None
+
+    def status_for_mode(self):
+        if self.paused:
+            return "SIMULATION PAUSED"
+        return {
+            "idle":"READY · ON LAUNCH PAD",
+            "takeoff":"TAKING OFF · CLIMBING TO ROUTE ALTITUDE",
+            "direct":"CRUISING · SENSORS ACTIVE",
+            "replan":"RANGE SENSOR · REPLANNING",
+            "follow":"FOLLOWING SENSOR-SAFE ROUTE",
+            "landing":"LANDING · DESCENDING TO PAD",
+            "complete":"LANDED · MOTORS IDLE",
+        }.get(self.mode,"READY · ON LAUNCH PAD")
+
+    def draw_pad(self, center, colour, rooftop=False):
+        x,y,z=center
+        pad_z=z+.045
+        half=10.0
+        glColor4f(.16,.20,.24,.92)
+        glBegin(GL_QUADS)
+        glVertex3f(x-half,y-half,pad_z); glVertex3f(x+half,y-half,pad_z)
+        glVertex3f(x+half,y+half,pad_z); glVertex3f(x-half,y+half,pad_z)
+        glEnd()
+        draw_circle_xy((x,y,pad_z+.02),8.0,colour,2.8,.98)
+        draw_circle_xy((x,y,pad_z+.025),6.2,colour,1.2,.78)
+        # Large H marking remains visible from the city overview.
+        draw_line((x-3.0,y-3.2,pad_z+.04),(x-3.0,y+3.2,pad_z+.04),(.97,.98,.98),2.6)
+        draw_line((x+3.0,y-3.2,pad_z+.04),(x+3.0,y+3.2,pad_z+.04),(.97,.98,.98),2.6)
+        draw_line((x-3.0,y,pad_z+.04),(x+3.0,y,pad_z+.04),(.97,.98,.98),2.6)
+        if rooftop:
+            draw_line((x-8.0,y-8.0,pad_z+.04),(x+8.0,y-8.0,pad_z+.04),colour,1.3,.85)
+            draw_line((x-8.0,y+8.0,pad_z+.04),(x+8.0,y+8.0,pad_z+.04),colour,1.3,.85)
+
+    def draw_start(self):
+        self.draw_pad(self.START_PAD,(.23,.75,.83))
+
+    def draw_goal(self):
+        self.draw_pad(self.LANDING_PAD,(.18,.78,.51),rooftop=True)
+
+
+
 if __name__=="__main__":
-    app=SkyRouteCity()
+    app=SkyRouteMission()
     pyglet.app.run()
+
+
+
 
 
 
