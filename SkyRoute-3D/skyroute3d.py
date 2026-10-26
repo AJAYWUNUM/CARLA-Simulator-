@@ -1059,7 +1059,7 @@ class SkyRouteCity(SkyRoute3D):
             d=length(delta)
             if d<nearest_distance:
                 nearest,nearest_distance=obstacle,d
-                nearest_prediction=(predicted,horizon)
+                nearest_prediction=(predicted,horizon,future_drone)
         self._sensor_prediction=(nearest,*nearest_prediction) if nearest_prediction else None
         return nearest
 
@@ -1082,7 +1082,22 @@ class SkyRouteCity(SkyRoute3D):
                                         else self.predicted_center(obstacle))
         try:
             if getattr(self,"mission_type",None)=="sensor":
-                path=self.plan_path_dstar(self.drone,self.GOAL)
+                gate_index=min(getattr(self,"sensor_gate_index",0),
+                               len(getattr(self,"sensor_route_gates",[])))
+                if prediction and prediction[0] is obstacle and gate_index<len(self.sensor_route_gates):
+                    impact=prediction[3]
+                    route_axis=unit(sub(self.GOAL,self.START))
+                    impact_progress=dot(sub(impact,self.START),route_axis)
+                    gate_index=next((i for i in range(gate_index,len(self.sensor_route_gates))
+                                     if dot(sub(self.sensor_route_gates[i],self.START),route_axis)
+                                     >impact_progress+35.0),len(self.sensor_route_gates))
+                    self.sensor_gate_index=gate_index
+                rejoin_goal=(self.sensor_route_gates[gate_index]
+                             if gate_index<len(self.sensor_route_gates) else self.GOAL)
+                path=self.plan_path_dstar(self.drone,rejoin_goal)
+                if path and gate_index<len(self.sensor_gate_route_indices):
+                    suffix_start=self.sensor_gate_route_indices[gate_index]+1
+                    path=path+self.baseline_route[suffix_start:]
                 planner_name="D* LITE"
             else:
                 path=self.plan_path(self.drone,self.GOAL)
@@ -1715,6 +1730,7 @@ class SkyRouteMission(SkyRouteCity):
     TAKEOFF_SPEED = 9.0
     CRUISE_SPEED = 35.0
     LANDING_SPEED = 8.0
+    SENSOR_ROUTE_FRACTIONS = (.24,.46,.70,.90)
 
     def __init__(self):
         super().__init__()
@@ -1727,7 +1743,7 @@ class SkyRouteMission(SkyRouteCity):
         self.labels["button_contact"].text="START SENSOR MISSION"
         self.labels["button_auto"].text="START SAFE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
-        self.labels["mission_sub"].text="Sensor: A* result + D* sensor reroutes · Safe: A* · rooftop landing"
+        self.labels["mission_sub"].text="Sensor: A* hazard corridor + D* local reroutes · Safe: A*"
         self.labels["world_sub"].text="4.41 km² · tree-lined streets · 64 moving cars · 12 aerial hazards"
         self.labels["controls"].text="C sensor mode  A safe mode  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
@@ -1742,6 +1758,9 @@ class SkyRouteMission(SkyRouteCity):
         self.route_index=0
         self.baseline_route=[]
         self.resultant_route=[]
+        self.sensor_route_gates=[]
+        self.sensor_gate_route_indices=[]
+        self.sensor_gate_index=0
         self.direct_target=None
         self.mission_type="sensor"
         self.route_planner="A*"
@@ -1770,6 +1789,32 @@ class SkyRouteMission(SkyRouteCity):
         self.camera_distance=220.0
         self.mode="takeoff"
         self.set_status("SAFE MODE · A* ROUTE · TAKING OFF",2.2)
+
+    def plan_sensor_resultant_path(self,start,goal):
+        gates=[lerp(start,goal,fraction) for fraction in self.SENSOR_ROUTE_FRACTIONS]
+        route=[]
+        gate_route_indices=[]
+        anchor=start
+        for index,target in enumerate(gates+[goal]):
+            leg=self.plan_path(anchor,target)
+            if not leg:
+                self.sensor_route_gates=[]
+                self.sensor_gate_route_indices=[]
+                self.sensor_gate_index=0
+                return []
+            route.extend(leg if not route else leg[1:])
+            if index<len(gates):
+                gate_route_indices.append(len(route)-1)
+            anchor=target
+        self.sensor_route_gates=gates
+        self.sensor_gate_route_indices=gate_route_indices
+        self.sensor_gate_index=0
+        return route
+
+    def advance_sensor_gate(self):
+        while (self.sensor_gate_index<len(self.sensor_route_gates) and
+               distance(self.drone,self.sensor_route_gates[self.sensor_gate_index])<10.0):
+            self.sensor_gate_index+=1
 
     def begin_landing(self):
         self.drone=(self.GOAL[0],self.GOAL[1],max(self.GOAL[2],self.drone[2]))
@@ -1829,7 +1874,10 @@ class SkyRouteMission(SkyRouteCity):
 
         if self.mode=="takeoff":
             if self.move_drone(self.START,self.TAKEOFF_SPEED,dt):
-                path=self.plan_path(self.START,self.GOAL)
+                if self.mission_type=="sensor":
+                    path=self.plan_sensor_resultant_path(self.START,self.GOAL)
+                else:
+                    path=self.plan_path(self.START,self.GOAL)
                 planner_name="A*"
                 if path:
                     self.route=path
@@ -1847,6 +1895,8 @@ class SkyRouteMission(SkyRouteCity):
             return
 
         if self.mode in ("direct","follow"):
+            if self.mode=="follow" and self.mission_type=="sensor":
+                self.advance_sensor_gate()
             obstacle=self.detect_sensor_hazard()
             if obstacle and self.avoidance_cooldowns.get(obstacle,0.0)<=self.time:
                 self.begin_sensor_avoidance(obstacle)
