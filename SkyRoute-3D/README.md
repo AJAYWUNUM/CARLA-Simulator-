@@ -4,7 +4,7 @@ SkyRoute is a native OpenGL desktop simulation for an autonomous drone mission i
 
 ## Mission
 
-The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. Sensor Mode uses D* Lite's resultant route as its active route from the start, while leaving unseen course hazards unknown. When sensors predict a collision risk, D* Lite incrementally updates the obstacle map and replaces the active route with a new resultant path around the detected hazard. Safe Mode plans an A* clearance route around the known obstacle map before flight. Both modes land on the rooftop pad and stop the rotors instead of hovering.
+The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. Sensor Mode uses D* Lite's resultant route as its active route from the start, while leaving unseen course hazards unknown. When sensors predict a collision risk, D* Lite incrementally marks the predicted encounter point as blocked and replaces the active route with a new resultant path around it. Until a hazard is detected, the sensor route can match the direct A* route because no avoidance is needed yet. Safe Mode plans an A* clearance route around the known obstacle map before flight. Both modes land on the rooftop pad and stop the rotors instead of hovering.
 
 ## Run
 
