@@ -4,7 +4,7 @@ SkyRoute is a native OpenGL desktop simulation for an autonomous drone mission i
 
 ## Mission
 
-The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. Sensor Mode follows the normal A* route while leaving unseen course hazards unknown. When sensors predict a collision risk, D* Lite incrementally updates the obstacle map, computes the resultant route around the detected hazard, and makes that route active for the rest of the mission. The original A* line remains visible as a faint reference, while the orange D* route shows the path the drone is following. Safe Mode plans an A* clearance route around the known obstacle map before flight. Both modes land on the rooftop pad and stop the rotors instead of hovering.
+The drone starts on a plaza launch pad, climbs to its flight corridor, then flies about 1.5 km to a rooftop helipad. The route has 12 moving hazards: crossing UAVs, sensor balloons, and suspended construction platforms. Sensor Mode uses D* Lite's resultant route as its active route from the start, while leaving unseen course hazards unknown. When sensors predict a collision risk, D* Lite incrementally updates the obstacle map and replaces the active route with a new resultant path around the detected hazard. Safe Mode plans an A* clearance route around the known obstacle map before flight. Both modes land on the rooftop pad and stop the rotors instead of hovering.
 
 ## Run
 
@@ -29,7 +29,7 @@ Both Sensor Mode and Safe Mode start in chase view. The camera label at the top 
 - City footprint: 4.2 km × 1.05 km (4.41 km²), with a 20-by-4 block grid.
 - 80 varied buildings with multi-floor windows, reflective glazing, roof parapets and rooftop equipment.
 - 64 moving cars, 152 varied roadside trees, 14 sidewalk pedestrians and 12 moving course hazards. The hazards use seeded variation in direction, crossing axis, speed and distance so their motion is repeatable but not synchronized.
-- Sensor Mode follows the normal A* path first. When the sensors predict collision risk, incremental D* Lite computes a resultant path and switches the drone to follow it; the HUD and route colors identify the active path. The HUD counts unique course hazards sensed out of 12.
+- Sensor Mode follows the D* Lite resultant path from takeoff. When the sensors predict collision risk, D* Lite updates the map and computes a new resultant path that becomes active; the HUD identifies it as the route in use. The HUD counts unique course hazards sensed out of 12.
 - Safe Mode uses A* to plan a clearance route around known obstacles before takeoff.
 - D* Lite follows Koenig and Likhachev, AAAI 2002: [D* Lite paper](https://ocs.aaai.org/Library/AAAI/2002/aaai02-072.php).
 - Mission stages: launch, vertical takeoff, cruise, landing approach, touchdown and motors idle.
