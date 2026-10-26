@@ -737,6 +737,7 @@ class SkyRouteCity(SkyRoute3D):
     WORLD_MAX = (2100.0, 525.0, 225.0)
     GRID_STEP = 50.0
     SENSOR_RANGE = 180.0
+    SENSOR_SAFETY_CLEARANCE = 3.0
     COURSE_HAZARD_COUNT = 12
     HAZARD_SPEED_SCALE = 1.0
     CITY_CAR_COUNT = 64
@@ -1224,7 +1225,7 @@ class SkyRouteCity(SkyRoute3D):
             miss=sub(predicted,future_drone)
             future_along=dot(miss,forward)
             side=length(sub(miss,mul(forward,future_along)))
-            collision_margin=self.DRONE_RADIUS+4.0
+            collision_margin=self.DRONE_RADIUS+self.SENSOR_SAFETY_CLEARANCE
             if obstacle.kind in ("aircraft","sphere"):
                 vertical_extent=obstacle.size+collision_margin
                 lateral_extent=obstacle.size+collision_margin
