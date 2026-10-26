@@ -686,7 +686,9 @@ class SkyRouteCity(SkyRoute3D):
         self.avoidance_cooldowns = {}
         self.detected_course_hazards = set()
         self._planning_obstacle = None
+        self._planning_obstacle_center = None
         self._planning_mode = False
+        self._sensor_prediction = None
         self._dstar_planner = None
         super().__init__()
         self.camera_mode = "overview"
@@ -839,7 +841,9 @@ class SkyRouteCity(SkyRoute3D):
         self.detected_course_hazards.clear()
         self._dstar_planner=None
         self._planning_obstacle=None
+        self._planning_obstacle_center=None
         self._planning_mode=False
+        self._sensor_prediction=None
         self.camera_mode="overview"
         self.camera_distance=4600.0
         self.camera_elevation=56.0
@@ -884,7 +888,11 @@ class SkyRouteCity(SkyRoute3D):
                     and obstacle.name.startswith("Course hazard")
                     and obstacle is not self._planning_obstacle):
                 continue
-            center=self.predicted_center(obstacle) if self._planning_mode else obstacle.center
+            if (self._planning_mode and obstacle is self._planning_obstacle
+                    and self._planning_obstacle_center is not None):
+                center=self._planning_obstacle_center
+            else:
+                center=self.predicted_center(obstacle) if self._planning_mode else obstacle.center
             cx,cy,cz=center
             dynamic_pad=.82 if self._planning_mode and obstacle.motion else 0.0
             pad=clearance+dynamic_pad
@@ -921,7 +929,9 @@ class SkyRouteCity(SkyRoute3D):
                 return []
             blocked=set()
             target=self._planning_obstacle
-            target_center=self.predicted_center(target) if target else None
+            target_center=(self._planning_obstacle_center
+                           if target is not None and self._planning_obstacle_center is not None
+                           else self.predicted_center(target) if target else None)
             target_pad=step*.55
             for x in range(dims[0]):
                 for y in range(dims[1]):
@@ -999,6 +1009,7 @@ class SkyRouteCity(SkyRoute3D):
         forward=unit(sub(aim,self.drone))
         nearest=None
         nearest_distance=self.SENSOR_RANGE+1
+        nearest_prediction=None
         speed=max(1.0,getattr(self,"CRUISE_SPEED",35.0))
         max_horizon=self.SENSOR_RANGE/speed
         for obstacle in self.obstacles:
@@ -1048,6 +1059,8 @@ class SkyRouteCity(SkyRoute3D):
             d=length(delta)
             if d<nearest_distance:
                 nearest,nearest_distance=obstacle,d
+                nearest_prediction=(predicted,horizon)
+        self._sensor_prediction=(nearest,*nearest_prediction) if nearest_prediction else None
         return nearest
 
     def begin_sensor_avoidance(self,obstacle,emergency=False):
@@ -1064,6 +1077,9 @@ class SkyRouteCity(SkyRoute3D):
         self.direct_target=None
         self.mode="replan"
         self._planning_obstacle=obstacle
+        prediction=self._sensor_prediction
+        self._planning_obstacle_center=(prediction[1] if prediction and prediction[0] is obstacle
+                                        else self.predicted_center(obstacle))
         try:
             if getattr(self,"mission_type",None)=="sensor":
                 path=self.plan_path_dstar(self.drone,self.GOAL)
@@ -1073,6 +1089,7 @@ class SkyRouteCity(SkyRoute3D):
                 planner_name="A*"
         finally:
             self._planning_obstacle=None
+            self._planning_obstacle_center=None
         if path:
             self.route=path
             self.route_index=1 if len(path)>1 else 0
