@@ -42,7 +42,8 @@ The city is procedural and has a Central Park-scale footprint; it is not a geore
 
 ## Project files
 
-- `skyroute3d.py` — simulation, city generation, sensor logic and 3D renderer.
+- `skyroute3d.py` — city simulation and renderer; uses the AI model in `skyroute_ai_model.py`.
+- `skyroute_ai_model.py` — report-ready, standard-library-only LiDAR, Kalman, collision-risk, A*, and D* Lite algorithms.
 - `run_skyroute.bat` — Windows launcher.
 - `requirements.txt` — pinned Pyglet dependency.
 - `vendor/pyglet` — bundled windowing and OpenGL library.
