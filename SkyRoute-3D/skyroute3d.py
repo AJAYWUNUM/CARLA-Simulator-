@@ -1,6 +1,5 @@
 """SkyRoute 3D — native OpenGL UAV path-planning simulation."""
 from __future__ import annotations
-import heapq
 import math
 import random
 import sys
@@ -15,6 +14,12 @@ pyglet.options["debug_gl"] = False
 from pyglet.gl import *
 from pyglet.gl.gl_compat import *
 from pyglet.window import key, mouse
+from skyroute_ai_model import (
+    DStarLitePlanner,
+    LiDARKalmanModel,
+    assess_collision_risk,
+    astar_3d,
+)
 
 
 def add(a, b): return tuple(a[i] + b[i] for i in range(3))
@@ -107,64 +112,6 @@ class Obstacle:
         self.name=name; self.kind=kind; self.center=center; self.size=size
         self.colour=colour; self.demo=demo; self.contacted=False
 
-
-class _AxisKalman:
-    """One-dimensional constant-velocity Kalman filter for a LiDAR axis."""
-    def __init__(self,position,measurement_variance=4.0,acceleration_variance=9.0):
-        self.position=float(position)
-        self.velocity=0.0
-        self.p00=25.0
-        self.p01=0.0
-        self.p10=0.0
-        self.p11=100.0
-        self.measurement_variance=measurement_variance
-        self.acceleration_variance=acceleration_variance
-
-    def update(self,measurement,dt):
-        dt=max(1e-3,float(dt))
-        q=self.acceleration_variance
-        old00,old01,old10,old11=self.p00,self.p01,self.p10,self.p11
-        self.position+=self.velocity*dt
-        self.p00=old00+dt*(old01+old10)+dt*dt*old11+q*dt**4*.25
-        self.p01=old01+dt*old11+q*dt**3*.5
-        self.p10=old10+dt*old11+q*dt**3*.5
-        self.p11=old11+q*dt*dt
-        pred00,pred01,pred10,pred11=self.p00,self.p01,self.p10,self.p11
-        innovation=float(measurement)-self.position
-        variance=max(1e-9,pred00+self.measurement_variance)
-        gain_position=pred00/variance
-        gain_velocity=pred10/variance
-        self.position+=gain_position*innovation
-        self.velocity+=gain_velocity*innovation
-        self.p00=max(1e-9,(1.0-gain_position)*pred00)
-        self.p01=(1.0-gain_position)*pred01
-        self.p10=pred10-gain_velocity*pred00
-        self.p11=max(1e-9,pred11-gain_velocity*pred01)
-
-
-class _KalmanObstacleTrack:
-    """Tracks noisy 3D LiDAR position samples and predicts obstacle motion."""
-    def __init__(self,measurement,time_now,measurement_variance=4.0):
-        self.axes=[_AxisKalman(measurement[i],measurement_variance) for i in range(3)]
-        self.last_seen_time=float(time_now)
-
-    def update(self,measurement,time_now):
-        dt=max(1e-3,float(time_now)-self.last_seen_time)
-        for i,axis in enumerate(self.axes):
-            axis.update(measurement[i],dt)
-        self.last_seen_time=float(time_now)
-
-    @property
-    def position(self):
-        return tuple(axis.position for axis in self.axes)
-
-    @property
-    def velocity(self):
-        return tuple(axis.velocity for axis in self.axes)
-
-    def predict(self,horizon):
-        horizon=max(0.0,float(horizon))
-        return tuple(axis.position+axis.velocity*horizon for axis in self.axes)
 
 
 class SkyRoute3D(pyglet.window.Window):
@@ -276,43 +223,8 @@ class SkyRoute3D(pyglet.window.Window):
         return all(not self.collides(lerp(a,b,i/steps),clearance) for i in range(1,steps))
 
     def plan_path(self,start,goal):
-        step=self.GRID_STEP; lo,hi=self.WORLD_MIN,self.WORLD_MAX
-        dims=tuple(int(round((hi[i]-lo[i])/step))+1 for i in range(3))
-        def to_cell(p): return tuple(int(round((p[i]-lo[i])/step)) for i in range(3))
-        def to_point(c): return tuple(lo[i]+c[i]*step for i in range(3))
-        start_cell,goal_cell=to_cell(start),to_cell(goal)
-        if self.collides(start,.25) or self.collides(goal,.25): return []
-        offsets=[(dx,dy,dz) for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1) if (dx,dy,dz)!=(0,0,0)]
-        opened=[(0.0,0.0,start_cell)]; came={}; costs={start_cell:0.0}; closed=set()
-        while opened:
-            _,current_cost,current=heapq.heappop(opened)
-            if current in closed: continue
-            if current==goal_cell:
-                cells=[current]
-                while current in came:
-                    current=came[current]; cells.append(current)
-                cells.reverse()
-                raw=[start]+[to_point(c) for c in cells[1:-1]]+[goal]
-                smooth=[raw[0]]; anchor=0
-                while anchor<len(raw)-1:
-                    furthest=anchor+1
-                    for candidate in range(len(raw)-1,anchor,-1):
-                        if self.segment_clear(raw[anchor],raw[candidate]):
-                            furthest=candidate; break
-                    smooth.append(raw[furthest]); anchor=furthest
-                return smooth
-            closed.add(current)
-            for off in offsets:
-                nxt=tuple(current[i]+off[i] for i in range(3))
-                if any(nxt[i]<0 or nxt[i]>=dims[i] for i in range(3)) or nxt in closed: continue
-                point=to_point(nxt)
-                if self.collides(point,.53): continue
-                edge=math.sqrt(sum(v*v for v in off))*step
-                new_cost=current_cost+edge
-                if new_cost>=costs.get(nxt,float("inf")): continue
-                costs[nxt]=new_cost; came[nxt]=current
-                heapq.heappush(opened,(new_cost+distance(point,goal),new_cost,nxt))
-        return []
+        return astar_3d(start,goal,self.WORLD_MIN,self.WORLD_MAX,self.GRID_STEP,
+                        self.collides,self.segment_clear)
 
     def begin_contact(self,obstacle,previous):
         self.drone=previous; self.velocity=0.0; self.contacts+=1
@@ -576,154 +488,6 @@ class UrbanObstacle(Obstacle):
         self.heading = 0.0
 
 
-class DStarLitePlanner:
-    """Incremental backward search for repairing a route after map changes."""
-    def __init__(self,dims,step,start,goal):
-        self.dims=dims
-        self.step=step
-        self.start=start
-        self.last_start=start
-        self.goal=goal
-        self.km=0.0
-        self.g={}
-        self.rhs={goal:0.0}
-        self.blocked=set()
-        self.queue=[]
-        self.versions={}
-        self.serial=0
-        self.initialized=False
-        self._push(goal)
-
-    @staticmethod
-    def value(table,node):
-        return table.get(node,math.inf)
-
-    def heuristic(self,a,b):
-        return self.step*math.sqrt(sum((a[i]-b[i])**2 for i in range(3)))
-
-    def calculate_key(self,node):
-        best=min(self.value(self.g,node),self.value(self.rhs,node))
-        return best+self.heuristic(self.start,node)+self.km,best
-
-    def neighbors(self,node):
-        for offset in ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)):
-            nxt=tuple(node[i]+offset[i] for i in range(3))
-            if all(0<=nxt[i]<self.dims[i] for i in range(3)):
-                yield nxt
-
-    def edge_cost(self,a,b):
-        return self.heuristic(a,b)
-
-    def _push(self,node,version=None):
-        if version is None:
-            version=self.versions.get(node,0)+1
-            self.versions[node]=version
-        k1,k2=self.calculate_key(node)
-        self.serial+=1
-        heapq.heappush(self.queue,(k1,k2,self.serial,node,version))
-
-    def _top_key(self):
-        while self.queue:
-            k1,k2,_,node,version=self.queue[0]
-            if self.versions.get(node)!=version:
-                heapq.heappop(self.queue)
-                continue
-            return k1,k2
-        return math.inf,math.inf
-
-    def _pop(self):
-        while self.queue:
-            k1,k2,_,node,version=heapq.heappop(self.queue)
-            if self.versions.get(node)==version:
-                return (k1,k2),node
-        return (math.inf,math.inf),None
-
-    def update_vertex(self,node):
-        if node!=self.goal:
-            if node in self.blocked:
-                self.rhs[node]=math.inf
-            else:
-                self.rhs[node]=min(
-                    (self.edge_cost(node,nxt)+self.value(self.g,nxt)
-                     for nxt in self.neighbors(node) if nxt not in self.blocked),
-                    default=math.inf,
-                )
-        version=self.versions.get(node,0)+1
-        self.versions[node]=version
-        if self.value(self.g,node)!=self.value(self.rhs,node):
-            self._push(node,version)
-
-    def update_blocked(self,new_blocked):
-        new_blocked=set(new_blocked)
-        changed=(self.blocked^new_blocked)
-        self.blocked=new_blocked
-        if not self.initialized:
-            affected=set(self.blocked)
-            for node in self.blocked:
-                affected.update(self.neighbors(node))
-            self.initialized=True
-        else:
-            affected=set(changed)
-            for node in changed:
-                affected.update(self.neighbors(node))
-        for node in affected:
-            self.update_vertex(node)
-
-    def move_start(self,new_start):
-        if new_start!=self.start:
-            self.km+=self.heuristic(self.last_start,new_start)
-            self.last_start=new_start
-            self.start=new_start
-
-    def compute_shortest_path(self):
-        start_key=self.calculate_key(self.start)
-        while self._top_key()<start_key or self.value(self.rhs,self.start)!=self.value(self.g,self.start):
-            old_key,node=self._pop()
-            if node is None:
-                break
-            new_key=self.calculate_key(node)
-            if old_key<new_key:
-                self._push(node)
-            elif self.value(self.g,node)>self.value(self.rhs,node):
-                self.g[node]=self.value(self.rhs,node)
-                for predecessor in self.neighbors(node):
-                    self.update_vertex(predecessor)
-            else:
-                self.g[node]=math.inf
-                self.update_vertex(node)
-                for predecessor in self.neighbors(node):
-                    self.update_vertex(predecessor)
-            start_key=self.calculate_key(self.start)
-
-    def extract_path(self):
-        if self.start in self.blocked or self.goal in self.blocked:
-            return []
-        self.compute_shortest_path()
-        if math.isinf(self.value(self.g,self.start)):
-            return []
-        path=[self.start]
-        seen={self.start}
-        current=self.start
-        max_steps=math.prod(self.dims)
-        for _ in range(max_steps):
-            if current==self.goal:
-                return path
-            choices=[]
-            for nxt in self.neighbors(current):
-                if nxt in self.blocked:
-                    continue
-                score=self.edge_cost(current,nxt)+self.value(self.g,nxt)
-                if not math.isinf(score):
-                    choices.append((score,self.heuristic(nxt,self.goal),nxt))
-            if not choices:
-                return []
-            current=min(choices)[2]
-            if current in seen:
-                return []
-            seen.add(current)
-            path.append(current)
-        return []
-
 
 class SkyRouteCity(SkyRoute3D):
     """Urban sensor-avoidance scenario with moving traffic and camera presets."""
@@ -760,9 +524,15 @@ class SkyRouteCity(SkyRoute3D):
         self._planning_mode = False
         self._sensor_prediction = None
         self._dstar_planner = None
-        self._kalman_tracks = {}
-        self._lidar_detections = []
-        self.lidar_rng = random.Random(41218)
+        self.ai_model=LiDARKalmanModel(
+            beam_angles=self.LIDAR_BEAM_ANGLES,
+            beam_half_angle=self.LIDAR_BEAM_HALF_ANGLE,
+            max_range=self.SENSOR_RANGE,
+            measurement_std=self.LIDAR_MEASUREMENT_STD,
+            seed=41218,
+        )
+        self._kalman_tracks=self.ai_model.tracks
+        self._lidar_detections=self.ai_model.return_points
         super().__init__()
         self.camera_mode = "overview"
         self.camera_distance = 4600.0
@@ -950,9 +720,9 @@ class SkyRouteCity(SkyRoute3D):
         self._planning_obstacle_center=None
         self._planning_mode=False
         self._sensor_prediction=None
-        self._kalman_tracks.clear()
-        self._lidar_detections=[]
-        self.lidar_rng=random.Random(41218)
+        self.ai_model.reset()
+        self._kalman_tracks=self.ai_model.tracks
+        self._lidar_detections=self.ai_model.return_points
         self.camera_mode="overview"
         self.camera_distance=4600.0
         self.camera_elevation=56.0
@@ -1125,70 +895,13 @@ class SkyRouteCity(SkyRoute3D):
         return self.GOAL
 
     def scan_lidar(self,forward):
-        """Cast a horizontal LiDAR fan and update tracks from noisy returns."""
-        forward_xy=unit((forward[0],forward[1],0.0))
-        if length(forward_xy)<1e-8:
-            heading=math.radians(self.heading)
-            forward_xy=(math.cos(heading),math.sin(heading),0.0)
-        nearest_by_beam={}
-        beams=self.LIDAR_BEAM_ANGLES
-        for obstacle in self.obstacles:
-            delta=sub(obstacle.center,self.drone)
-            horizontal=(delta[0],delta[1],0.0)
-            horizontal_range=length(horizontal)
-            range_3d=length(delta)
-            if range_3d<1e-6 or range_3d>self.SENSOR_RANGE:
-                continue
-            if horizontal_range<1e-6:
-                angle=0.0
-            else:
-                forward_dot=dot(forward_xy,horizontal)
-                cross_track=forward_xy[0]*horizontal[1]-forward_xy[1]*horizontal[0]
-                angle=math.degrees(math.atan2(cross_track,forward_dot))
-            beam=min(beams,key=lambda sample:abs(sample-angle))
-            if angle < beams[0]-self.LIDAR_BEAM_HALF_ANGLE or angle > beams[-1]+self.LIDAR_BEAM_HALF_ANGLE:
-                continue
-            if abs(angle-beam)>self.LIDAR_BEAM_HALF_ANGLE:
-                continue
-            if isinstance(obstacle.size,tuple):
-                vertical_extent=obstacle.size[2]
-                radius_xy=math.hypot(obstacle.size[0],obstacle.size[1])
-            else:
-                vertical_extent=obstacle.size
-                radius_xy=obstacle.size
-            if abs(delta[2])>vertical_extent+8.0:
-                continue
-            angular_radius=math.degrees(math.asin(clamp(radius_xy/max(horizontal_range,1e-6),0.0,.98)))
-            for beam in beams:
-                beam_delta=angle-beam
-                if abs(beam_delta)>self.LIDAR_BEAM_HALF_ANGLE+angular_radius:
-                    continue
-                ray_distance=max(0.0,horizontal_range*math.cos(math.radians(beam_delta))-radius_xy)
-                if ray_distance>self.SENSOR_RANGE:
-                    continue
-                current=nearest_by_beam.get(beam)
-                if current is None or ray_distance<current[0]:
-                    nearest_by_beam[beam]=(ray_distance,obstacle)
-
-        visible=sorted({obstacle for _,obstacle in nearest_by_beam.values()},
-                       key=lambda obstacle:obstacle.name)
-        found=[]
-        for obstacle in visible:
-            measurement=tuple(obstacle.center[i]+self.lidar_rng.gauss(0.0,self.LIDAR_MEASUREMENT_STD)
-                              for i in range(3))
-            track=self._kalman_tracks.get(obstacle)
-            if track is None:
-                track=_KalmanObstacleTrack(measurement,self.time,self.LIDAR_MEASUREMENT_STD**2)
-                self._kalman_tracks[obstacle]=track
-            else:
-                track.update(measurement,self.time)
-            found.append((obstacle,track))
+        """Run the standalone AI model's simulated LiDAR/Kalman pipeline."""
+        detections=self.ai_model.scan(self.obstacles,self.drone,forward,self.time)
+        self._lidar_detections=self.ai_model.return_points
+        for obstacle,_ in detections:
             if obstacle.name.startswith("Course hazard"):
                 self.detected_course_hazards.add(obstacle.name)
-        self._lidar_detections=sorted(((obstacle,track.position) for obstacle,track in found),
-                                      key=lambda item:distance(self.drone,item[1]))
-        return found
-
+        return detections
     def detect_sensor_hazard(self,dt=1.0/60.0):
         aim=self.route_aim()
         forward=unit(sub(aim,self.drone))
@@ -1196,52 +909,11 @@ class SkyRouteCity(SkyRoute3D):
             heading=math.radians(self.heading)
             forward=(math.cos(heading),math.sin(heading),0.0)
         detections=self.scan_lidar(forward)
-        nearest=None
-        nearest_distance=self.SENSOR_RANGE+1
-        nearest_prediction=None
-        speed=max(1.0,getattr(self,"CRUISE_SPEED",35.0))
-        max_horizon=self.SENSOR_RANGE/speed
-        for obstacle,track in detections:
-            if self.avoidance_cooldowns.get(obstacle,0.0)>self.time:
-                continue
-            center=track.position
-            delta=sub(center,self.drone)
-            along=dot(delta,forward)
-            if along<=0 or along>self.SENSOR_RANGE:
-                continue
-            horizon=clamp(along/speed,0.0,max_horizon)
-            predicted=None
-            for _ in range(3):
-                predicted=track.predict(horizon)
-                projected=sub(predicted,self.drone)
-                predicted_along=dot(projected,forward)
-                if predicted_along<=0 or predicted_along>self.SENSOR_RANGE:
-                    predicted=None
-                    break
-                horizon=clamp(predicted_along/speed,0.0,max_horizon)
-            if predicted is None:
-                continue
-            future_drone=add(self.drone,mul(forward,speed*horizon))
-            miss=sub(predicted,future_drone)
-            future_along=dot(miss,forward)
-            side=length(sub(miss,mul(forward,future_along)))
-            collision_margin=self.DRONE_RADIUS+self.SENSOR_SAFETY_CLEARANCE
-            if obstacle.kind in ("aircraft","sphere"):
-                vertical_extent=obstacle.size+collision_margin
-                lateral_extent=obstacle.size+collision_margin
-            else:
-                hx,hy,hz=obstacle.size
-                vertical_extent=hz+collision_margin
-                lateral_extent=max(hx,hy)+collision_margin
-            if abs(miss[2])>vertical_extent or side>lateral_extent or abs(future_along)>10.0:
-                continue
-            measured_distance=length(delta)
-            if measured_distance<nearest_distance:
-                nearest,nearest_distance=obstacle,measured_distance
-                nearest_prediction=(predicted,horizon,future_drone)
-        self._sensor_prediction=(nearest,*nearest_prediction) if nearest_prediction else None
-        return nearest
-
+        self._sensor_prediction=assess_collision_risk(
+            detections,self.drone,forward,getattr(self,"CRUISE_SPEED",35.0),
+            self.SENSOR_RANGE,self.DRONE_RADIUS,self.SENSOR_SAFETY_CLEARANCE,
+            cooldowns=self.avoidance_cooldowns,time_seconds=self.time)
+        return self._sensor_prediction[0] if self._sensor_prediction else None
     def begin_sensor_avoidance(self,obstacle,emergency=False):
         self.avoidances+=1
         self.replan_count=getattr(self,"replan_count",0)+1
