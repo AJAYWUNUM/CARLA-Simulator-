@@ -820,7 +820,9 @@ class SkyRouteCity(SkyRoute3D):
             target_center=(self._planning_obstacle_center
                            if target is not None and self._planning_obstacle_center is not None
                            else self.predicted_center(target) if target else None)
-            target_pad=step*.55
+            # Grid cells are 50 m apart. A half-cell obstacle pad can enclose
+            # the drone's own snapped cell when a hazard is detected nearby.
+            target_pad=max(5.0,step*.12)
             for x in range(dims[0]):
                 for y in range(dims[1]):
                     for z in range(dims[2]):
@@ -840,6 +842,11 @@ class SkyRouteCity(SkyRoute3D):
                                 blocked_here=((px-cx)**2+(py-cy)**2+(pz-cz)**2<=radius*radius)
                         if blocked_here:
                             blocked.add(cell)
+            # The continuous drone position is checked above. Its snapped grid
+            # cell can still lie inside the obstacle inflation zone; allow D*
+            # to expand from that physically clear start and leave the hazard.
+            if start_cell in blocked and not self.collides(start,.25):
+                blocked.discard(start_cell)
             planner=self._dstar_planner
             if (planner is None or planner.dims!=dims or planner.step!=step or
                     planner.goal!=goal_cell):
@@ -939,11 +946,23 @@ class SkyRouteCity(SkyRoute3D):
                         else measured_position)
                 rejoin_goal,baseline_suffix=self.sensor_rejoin_after(impact,60.0)
                 path=self.plan_path_dstar(self.drone,rejoin_goal)
-                if path and baseline_suffix:
+                planner_name="D* LITE"
+                if not path:
+                    # Recover the same rejoin route with A* if D* cannot extract
+                    # a route from this frame's grid (for example, a blocked
+                    # snapped start cell at very close sensor range).
+                    path=self.plan_path(self.drone,rejoin_goal)
+                    planner_name="A* RECOVERY"
+                if not path:
+                    # Keep the mission moving toward its destination if the
+                    # local rejoin target itself is temporarily unavailable.
+                    path=self.plan_path(self.drone,self.GOAL)
+                    planner_name="A* FULL RECOVERY"
+                    baseline_suffix=[]
+                if path and baseline_suffix and planner_name!="A* FULL RECOVERY":
                     if distance(path[-1],baseline_suffix[0])<1e-5:
                         baseline_suffix=baseline_suffix[1:]
                     path=path+baseline_suffix
-                planner_name="D* LITE"
             else:
                 path=self.plan_path(self.drone,self.GOAL)
                 planner_name="A*"
