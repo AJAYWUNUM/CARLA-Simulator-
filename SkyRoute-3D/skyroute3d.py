@@ -19,6 +19,8 @@ from skyroute_ai_model import (
     LiDARKalmanModel,
     assess_collision_risk,
     astar_3d,
+    choose_best_path,
+    obstacle_surface_clearance,
 )
 
 
@@ -502,6 +504,7 @@ class SkyRouteCity(SkyRoute3D):
     GRID_STEP = 50.0
     SENSOR_RANGE = 180.0
     SENSOR_SAFETY_CLEARANCE = 3.0
+    SENSOR_REROUTE_DISTANCE = 2.0
     COURSE_HAZARD_COUNT = 12
     HAZARD_SPEED_SCALE = 1.0
     CITY_CAR_COUNT = 64
@@ -900,7 +903,8 @@ class SkyRouteCity(SkyRoute3D):
         self._sensor_prediction=assess_collision_risk(
             detections,self.drone,forward,getattr(self,"CRUISE_SPEED",35.0),
             self.SENSOR_RANGE,self.DRONE_RADIUS,self.SENSOR_SAFETY_CLEARANCE,
-            cooldowns=self.avoidance_cooldowns,time_seconds=self.time)
+            cooldowns=self.avoidance_cooldowns,time_seconds=self.time,
+            current_trigger_distance=self.SENSOR_REROUTE_DISTANCE)
         return self._sensor_prediction[0] if self._sensor_prediction else None
     def begin_sensor_avoidance(self,obstacle,emergency=False):
         self.avoidances+=1
@@ -911,13 +915,17 @@ class SkyRouteCity(SkyRoute3D):
         self.sensor_target=obstacle
         track=self._kalman_tracks.get(obstacle)
         measured_position=track.position if track else obstacle.center
-        self.sensor_reading=distance(self.drone,measured_position)
+        self.sensor_reading=obstacle_surface_clearance(
+            obstacle,self.drone,measured_position,self.DRONE_RADIUS)
         self.avoidance_cooldowns[obstacle]=self.time+6.0
         if obstacle.name.startswith("Course hazard"):
             self.detected_course_hazards.add(obstacle.name)
         self.velocity=0.0
-        label="PROXIMITY WARNING" if emergency else "RANGE SENSOR DETECTED"
-        self.set_status(f"{label} · {obstacle.name.upper()} AT {self.sensor_reading:.1f}M · REROUTING",3.0)
+        label="EMERGENCY STOP" if emergency else "2M SENSOR ALERT"
+        planner_label=("QUICK D* REROUTE" if getattr(self,"mission_type",None)=="sensor"
+                       else "A* REPLAN")
+        self.set_status(
+            f"{label} · {obstacle.name.upper()} · {self.sensor_reading:.1f}M GAP · {planner_label}",3.0)
         self.direct_target=None
         self.mode="replan"
         self._planning_obstacle=obstacle
@@ -1372,6 +1380,17 @@ class SkyRouteCity(SkyRoute3D):
     def draw_world_route(self):
         if len(self.route)<2:
             return
+        if getattr(self,"mission_type",None)=="sensor":
+            glLineWidth(1.4)
+            glColor4f(.24,.57,.68,.20)
+            glBegin(GL_LINES)
+            for name,path in getattr(self,"path_candidates",{}).items():
+                if name==getattr(self,"selected_path_name",None) or len(path)<2:
+                    continue
+                for a,b in zip(path,path[1:]):
+                    glVertex3f(a[0],a[1],a[2]+1.2)
+                    glVertex3f(b[0],b[1],b[2]+1.2)
+            glEnd()
         dstar_route=getattr(self,"route_planner",None)=="D* LITE"
         # Keep the original sensor-mode A* route visible as a faint reference
         # after a risk is detected. The active orange route is the D* result
@@ -1599,7 +1618,7 @@ class SkyRouteMission(SkyRouteCity):
         self.labels["button_contact"].text="START SENSOR MISSION"
         self.labels["button_auto"].text="START SAFE MISSION"
         self.labels["mission"].text="PLAZA LAUNCH  →  ROOFTOP HELIPAD"
-        self.labels["mission_sub"].text="Sensor: straight A* · D* detour/rejoin · Safe: A*"
+        self.labels["mission_sub"].text="AI A*: distance + turns + climb · 4 candidates"
         self.labels["world_sub"].text="4.41 km² · tree-lined streets · 64 moving cars · 12 aerial hazards"
         self.labels["controls"].text="C sensor mode  A safe mode  R reset  Space pause\n1 orbit  2 chase  3 pilot  4 top  5 city view · right-drag"
 
@@ -1613,6 +1632,10 @@ class SkyRouteMission(SkyRouteCity):
         self.route=[]
         self.route_index=0
         self.baseline_route=[]
+        self.path_candidates={}
+        self.path_candidate_scores={}
+        self.selected_path_name=None
+        self.selected_path_cost=math.inf
         self.resultant_route=[]
         self.direct_target=None
         self.mission_type="sensor"
@@ -1656,8 +1679,49 @@ class SkyRouteMission(SkyRouteCity):
         self.set_status("SAFE MODE · A* ROUTE · TAKING OFF",2.2)
 
     def plan_sensor_resultant_path(self,start,goal):
-        """Compute the one-shot A* baseline from launch directly to goal."""
-        return self.plan_path(start,goal)
+        """Compare A* corridor candidates and keep the lowest-cost resultant path."""
+        self.path_candidates={}
+        self.path_candidate_scores={}
+        self.selected_path_name=None
+        self.selected_path_cost=math.inf
+
+        dx=float(goal[0])-float(start[0])
+        dy=float(goal[1])-float(start[1])
+        horizontal=math.hypot(dx,dy)
+        normal=(-dy/horizontal,dx/horizontal) if horizontal>1e-8 else (0.0,1.0)
+        midpoint=lerp(start,goal,.5)
+
+        candidates={}
+        direct=self.plan_path(start,goal)
+        if direct:
+            candidates["DIRECT"]=direct
+
+        def via(waypoint):
+            first=self.plan_path(start,waypoint)
+            second=self.plan_path(waypoint,goal)
+            if not first or not second:
+                return []
+            return first+second[1:] if distance(first[-1],second[0])<1e-4 else first+second
+
+        for name,offset in (("NORTH",110.0),("SOUTH",-110.0)):
+            waypoint=(midpoint[0]+normal[0]*offset,
+                      midpoint[1]+normal[1]*offset,midpoint[2])
+            route=via(waypoint)
+            if route:
+                candidates[name]=route
+
+        high_z=min(self.WORLD_MAX[2]-10.0,midpoint[2]+45.0)
+        high_waypoint=(midpoint[0],midpoint[1],high_z)
+        high_route=via(high_waypoint)
+        if high_route:
+            candidates["HIGH"]=high_route
+
+        selected,path,scores=choose_best_path(candidates)
+        self.path_candidates={name:candidates[name] for name in scores}
+        self.path_candidate_scores=scores
+        self.selected_path_name=selected
+        self.selected_path_cost=scores[selected] if selected else math.inf
+        return path
 
     def sensor_rejoin_after(self,impact,lead_distance):
         """Choose a point ahead on the original A* path and its remaining suffix."""
@@ -1789,8 +1853,12 @@ class SkyRouteMission(SkyRouteCity):
                     self.baseline_route=list(path) if self.mission_type=="sensor" else []
                     self.resultant_route=[]
                     self.mode="follow"
-                    status="SENSOR MODE · A* RESULTANT PATH ACTIVE · SENSORS LIVE" if self.mission_type=="sensor" else "SAFE MODE · A* ROUTE ACTIVE"
-                    self.set_status(status,2.5)
+                    if self.mission_type=="sensor":
+                        self.set_status(
+                            f"A* COST PICK · {self.selected_path_name} · "
+                            f"{self.selected_path_cost:.0f} · 2M SENSOR LIVE",3.0)
+                    else:
+                        self.set_status("SAFE MODE · A* ROUTE ACTIVE",2.5)
                 else:
                     self.mode="idle"
                     self.drone=self.START_PAD
