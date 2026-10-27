@@ -42,6 +42,51 @@ def _unit(vector: Sequence[float]) -> Vector3:
     return _scale(vector, 1.0 / magnitude) if magnitude > 1e-9 else (0.0, 0.0, 0.0)
 
 
+def obstacle_surface_clearance(obstacle: object, drone_position: Sequence[float],
+                               obstacle_position: Sequence[float] | None = None,
+                               drone_radius: float = 0.0) -> float:
+    """Estimate the gap from the drone hull to an obstacle's nearest surface."""
+    center = obstacle.center if obstacle_position is None else obstacle_position
+    if obstacle.kind in ("aircraft", "sphere"):
+        return max(0.0, _norm(_sub(drone_position, center))
+                   - float(obstacle.size) - float(drone_radius))
+    half_x, half_y, half_z = obstacle.size
+    gap = (
+        max(0.0, abs(float(drone_position[0]) - float(center[0])) - float(half_x)),
+        max(0.0, abs(float(drone_position[1]) - float(center[1])) - float(half_y)),
+        max(0.0, abs(float(drone_position[2]) - float(center[2])) - float(half_z)),
+    )
+    return max(0.0, _norm(gap) - float(drone_radius))
+
+
+def score_path_cost(path: Sequence[Sequence[float]], turn_weight: float = 24.0,
+                    climb_weight: float = 1.5) -> float:
+    """Score route length plus distance-equivalent turn and altitude effort."""
+    if not path:
+        return math.inf
+    if len(path) == 1:
+        return 0.0
+    length_cost = sum(_norm(_sub(b, a)) for a, b in zip(path, path[1:]))
+    altitude_effort = sum(abs(float(b[2]) - float(a[2])) for a, b in zip(path, path[1:]))
+    turn_cost = 0.0
+    for a, b, c in zip(path, path[1:], path[2:]):
+        incoming = _unit(_sub(b, a))
+        outgoing = _unit(_sub(c, b))
+        alignment = max(-1.0, min(1.0, _dot(incoming, outgoing)))
+        turn_cost += float(turn_weight) * (1.0 - alignment)
+    return length_cost + float(climb_weight) * altitude_effort + turn_cost
+
+
+def choose_best_path(candidates: dict[str, Sequence[Sequence[float]]]):
+    """Return the lowest-cost named route and scores for all usable candidates."""
+    scores = {name: score_path_cost(path) for name, path in candidates.items()
+              if len(path) >= 2}
+    if not scores:
+        return None, [], {}
+    selected = min(scores, key=scores.get)
+    return selected, list(candidates[selected]), scores
+
+
 class AxisKalmanFilter:
     """One-dimensional constant-velocity Kalman filter.
 
@@ -213,7 +258,8 @@ def assess_collision_risk(detections: Iterable[tuple[object, ObstacleTrack]],
                           drone_position: Sequence[float], forward: Sequence[float],
                           cruise_speed: float, sensor_range: float, drone_radius: float,
                           safety_clearance: float, cooldowns: dict | None = None,
-                          time_seconds: float = 0.0):
+                          time_seconds: float = 0.0,
+                          current_trigger_distance: float | None = None):
     """Return the nearest predicted conflict as ``(obstacle, position, t, drone_future)``.
 
     A conflict is reported only when the constant-velocity obstacle estimate
@@ -232,6 +278,10 @@ def assess_collision_risk(detections: Iterable[tuple[object, ObstacleTrack]],
 
     for obstacle, track in detections:
         if cooldowns.get(obstacle, 0.0) > time_seconds:
+            continue
+        if (current_trigger_distance is not None and
+                obstacle_surface_clearance(obstacle, drone_position, track.position,
+                                           drone_radius) > float(current_trigger_distance)):
             continue
         delta = _sub(track.position, drone_position)
         along = _dot(delta, forward)
@@ -493,5 +543,6 @@ class DStarLitePlanner:
 
 __all__ = [
     "AxisKalmanFilter", "ObstacleTrack", "LiDARKalmanModel",
+    "obstacle_surface_clearance", "score_path_cost", "choose_best_path",
     "assess_collision_risk", "astar_3d", "DStarLitePlanner",
 ]
